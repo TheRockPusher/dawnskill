@@ -47,13 +47,13 @@ If a step would take more than 480 min, the skill is too broad. The planner shou
 
 **Rule.** The activity depends on the **target** level of the step. The more expertise the learner has, the less guidance the activity gives. This follows the expertise reversal effect: guidance that helps novices becomes redundant, or even harmful, for more experienced learners (Kalyuga, Ayres, Chandler & Sweller 2003).
 
-| Target | `activity` | Instruction (one sentence, shown to the user) | Source |
+| Target | `activity` | Instruction (shown to the user; verbatim from `ACTIVITY_GUIDE` in `kernel/learning.ts`) | Source |
 |---|---|---|---|
-| L1 | `worked-examples` | Study complete worked examples of the capability, then reproduce one yourself and explain each step in your own words. | Sweller & Cooper 1985 |
-| L2 | `guided-practice` | Work through examples with more steps left out each time, filling in the missing steps yourself, until you solve a new variant unaided. | Renkl & Atkinson 2003; Atkinson, Renkl & Merrill 2003 |
-| L3 | `independent-project` | Build a small but complete piece of work that uses the skill in a realistic setting, without a tutorial, and debug it yourself. | Kalyuga et al. 2003; van Merriënboer et al. 2002 |
-| L4 | `varied-cases` | Apply the skill to several deliberately different cases (inputs, constraints, codebases), aimed at your weak spots, and get immediate feedback (tests, review, benchmarks) on each. | Ericsson, Krampe & Tesch-Römer 1993; variability of practice in van Merriënboer et al. 2002 |
-| L5 | `teach-and-extend` | Explain the skill to others (write-up, talk or code review) and extend it past the documented path, including the cases where the usual rules break. | Fiorella & Mayer 2013 |
+| L1 | `worked-examples` | Study two or three complete worked examples of the capability, then reproduce one yourself without looking and explain each step in your own words. | Sweller & Cooper 1985 |
+| L2 | `guided-practice` | Work through examples with more steps left out each time, filling in the missing steps yourself and checking each attempt against tests or a reference solution, until you solve a new variant unaided. | Renkl & Atkinson 2003; Atkinson, Renkl & Merrill 2003 |
+| L3 | `independent-project` | Plan and build a small but complete piece of work that uses the skill in a realistic setting, without a tutorial, and debug it yourself. | Kalyuga et al. 2003; van Merriënboer et al. 2002 |
+| L4 | `varied-cases` | Analyse several varied real cases (other people's code, reviews, incidents), note what distinguishes them and where your own approach would fail, and reflect on the feedback you get. | Ericsson, Krampe & Tesch-Römer 1993 (feedback on targeted weaknesses); variability of practice in van Merriënboer et al. 2002 |
+| L5 | `teach-and-extend` | Explain the skill to others (write-up, talk or code review) and extend it to the edge cases where the usual rules break. | Fiorella & Mayer 2013 |
 
 **Deliverable.** `LearningSpec.deliverable` is free text. It names the application-ready artifact that proves the step and the task it unblocks (§4). It is not an enum.
 
