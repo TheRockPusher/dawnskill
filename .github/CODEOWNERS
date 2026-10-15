@@ -1,0 +1,7 @@
+# Default owner for everything.
+* @TheRockPusher
+
+# Human-owned gates: kernel, database backstop, CI. Require owner review.
+packages/core/src/kernel/ @TheRockPusher
+packages/host/src/db/ @TheRockPusher
+.github/ @TheRockPusher

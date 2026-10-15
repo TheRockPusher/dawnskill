@@ -1,0 +1,14 @@
+.git
+node_modules
+**/node_modules
+# The web app is built inside the image.
+dist
+**/dist
+data
+reports
+coverage
+**/coverage
+.stryker-tmp
+**/.stryker-tmp
+.env
+.env.*

@@ -1,0 +1,22 @@
+services:
+  dawnskill:
+    build: .
+    image: dawnskill:local
+    restart: unless-stopped
+    ports:
+      # Bound to localhost: the app has no auth. Drop "127.0.0.1:" to expose it on the LAN.
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - dawnskill-data:/data
+    # Passed through from the host environment (or a .env file next to this file) when set.
+    # A local model server on the host (Ollama, llama.cpp) is reachable from the container
+    # via host.docker.internal, e.g. DAWNSKILL_LLM_BASE_URL=http://host.docker.internal:11434/v1
+    environment:
+      - DAWNSKILL_LLM_BASE_URL
+      - DAWNSKILL_LLM_API_KEY
+      - DAWNSKILL_LLM_MODEL
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  dawnskill-data:
