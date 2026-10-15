@@ -2,27 +2,17 @@
 	"$schema": "https://unpkg.com/knip@6/schema.json",
 	"workspaces": {
 		".": {
-			"entry": ["vitest.config.ts", "test/setup.ts", "scripts/*.mjs"],
-			"project": ["*.ts", "test/**/*.ts", "scripts/**/*.mjs"],
+			"entry": ["scripts/*.mjs"],
 			"ignoreDependencies": ["@fast-check/vitest"]
 		},
-		"packages/core": {
-			"entry": ["src/index.ts", "src/user.ts", "src/**/*.test.ts"],
-			"project": ["src/**/*.ts"]
-		},
+		"packages/core": {},
 		"packages/agents": {
-			"entry": ["src/index.ts", "src/**/*.test.ts"],
-			"project": ["src/**/*.ts"],
 			"ignoreDependencies": ["@dawnskill/core", "typebox"]
 		},
 		"packages/host": {
-			"entry": ["src/main.ts", "src/**/*.test.ts"],
-			"project": ["src/**/*.ts"],
 			"ignoreDependencies": ["@dawnskill/agents", "@dawnskill/core", "typebox"]
 		},
 		"packages/web": {
-			"entry": ["src/main.tsx", "src/**/*.test.{ts,tsx}"],
-			"project": ["src/**/*.{ts,tsx}"],
 			"ignoreDependencies": ["@dawnskill/core"]
 		}
 	}
