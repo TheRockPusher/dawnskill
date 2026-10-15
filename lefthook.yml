@@ -1,0 +1,11 @@
+# Fast local checks only; CI is the gate.
+pre-commit:
+  commands:
+    format:
+      glob: "*.{js,mjs,cjs,ts,tsx,json,jsonc,css}"
+      run: pnpm exec biome format --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}
+
+commit-msg:
+  commands:
+    conventional-commit:
+      run: node scripts/check-commit-msg.mjs {1}

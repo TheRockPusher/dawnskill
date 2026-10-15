@@ -1,0 +1,33 @@
+{
+	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+	"vcs": {
+		"enabled": true,
+		"clientKind": "git",
+		"useIgnoreFile": true
+	},
+	"files": {
+		"ignoreUnknown": true,
+		"includes": [
+			"**",
+			"!**/node_modules",
+			"!**/dist",
+			"!**/coverage",
+			"!**/reports",
+			"!**/.stryker-tmp",
+			"!**/.tsbuild",
+			"!**/data",
+			"!**/pnpm-lock.yaml"
+		]
+	},
+	"formatter": {
+		"enabled": true,
+		"indentStyle": "tab",
+		"lineWidth": 120
+	},
+	"linter": {
+		"enabled": false
+	},
+	"assist": {
+		"enabled": false
+	}
+}

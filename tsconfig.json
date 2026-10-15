@@ -1,0 +1,26 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"composite": false,
+		"emitDeclarationOnly": false,
+		"noEmit": true,
+		"types": ["node"],
+		"allowJs": true,
+		"checkJs": true
+	},
+	"include": ["vitest.config.ts", "test/**/*.ts", "scripts/**/*.mjs"],
+	"references": [
+		{
+			"path": "packages/core"
+		},
+		{
+			"path": "packages/agents"
+		},
+		{
+			"path": "packages/host"
+		},
+		{
+			"path": "packages/web"
+		}
+	]
+}

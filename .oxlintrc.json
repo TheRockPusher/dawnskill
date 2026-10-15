@@ -1,0 +1,111 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"categories": {
+		"correctness": "error"
+	},
+	"env": {
+		"builtin": true,
+		"es2024": true
+	},
+	"ignorePatterns": ["**/dist/**", "**/.tsbuild/**", "coverage/**", "reports/**", ".stryker-tmp/**"],
+	"rules": {
+		"typescript/no-floating-promises": "error",
+		"typescript/switch-exhaustiveness-check": [
+			"error",
+			{
+				"allowDefaultCaseForExhaustiveSwitch": false
+			}
+		],
+		"no-restricted-imports": [
+			"error",
+			{
+				"paths": [
+					{
+						"name": "node:sqlite",
+						"message": "Only packages/host/src/db/** may use SQLite."
+					}
+				]
+			}
+		]
+	},
+	"overrides": [
+		{
+			"files": ["packages/agents/**", "packages/web/**"],
+			"rules": {
+				"no-restricted-imports": [
+					"error",
+					{
+						"paths": [
+							{
+								"name": "node:sqlite",
+								"message": "Only packages/host/src/db/** may use SQLite."
+							},
+							{
+								"name": "@dawnskill/core/user",
+								"message": "Only the host may import the user-facing kernel API."
+							}
+						]
+					}
+				]
+			}
+		},
+		{
+			"files": ["packages/core/**"],
+			"rules": {
+				"no-restricted-imports": [
+					"error",
+					{
+						"patterns": [
+							{
+								"group": ["node:*", "fs", "fs/*", "net", "http", "child_process"],
+								"message": "core is pure: no I/O. Do I/O in the host and pass data in."
+							},
+							{
+								"group": ["@earendil-works/*"],
+								"message": "core must not depend on the agent runtime."
+							},
+							{
+								"group": ["@dawnskill/*", "!@dawnskill/core", "!@dawnskill/core/*"],
+								"message": "core depends on nothing outside core."
+							}
+						]
+					}
+				],
+				"no-restricted-properties": [
+					"error",
+					{
+						"object": "Date",
+						"property": "now",
+						"message": "The clock is injected: take the current time as an ISO parameter."
+					},
+					{
+						"object": "Math",
+						"property": "random",
+						"message": "RNG is injected: take a random source as a parameter."
+					},
+					{
+						"object": "crypto",
+						"property": "randomUUID",
+						"message": "RNG is injected: take an id generator as a parameter."
+					},
+					{
+						"object": "crypto",
+						"property": "getRandomValues",
+						"message": "RNG is injected: take a random source as a parameter."
+					},
+					{
+						"object": "performance",
+						"property": "now",
+						"message": "The clock is injected: take the current time as a parameter."
+					}
+				]
+			}
+		},
+		{
+			"files": ["packages/host/src/db/**"],
+			"rules": {
+				"no-restricted-imports": "off"
+			}
+		}
+	]
+}

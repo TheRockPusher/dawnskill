@@ -1,0 +1,11 @@
+node_modules/
+dist/
+data/
+reports/
+coverage/
+.stryker-tmp/
+.tsbuild/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example

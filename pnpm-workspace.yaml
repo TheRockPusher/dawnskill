@@ -1,0 +1,15 @@
+packages:
+  - packages/*
+
+# Run `KEY=value cmd` style scripts the same way on every OS.
+shellEmulator: true
+
+# lefthook's postinstall installs the git hooks from lefthook.yml.
+allowBuilds:
+  lefthook: true
+
+# Pinned releases younger than pnpm's minimum release age.
+minimumReleaseAgeExclude:
+  - '@vitest/mocker@5.0.5'
+  - '@vitest/spy@5.0.5'
+  - vitest@5.0.5
