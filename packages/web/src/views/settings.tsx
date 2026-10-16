@@ -82,8 +82,41 @@ function Criteria({ view }: { readonly view: View }) {
 
 const SOURCE_LABEL = { app: "saved in this app", env: "from the host's environment variables" } as const;
 
+interface Preset {
+	readonly id: string;
+	readonly label: string;
+	readonly baseUrl: string;
+	/** Filled into Model when the preset is chosen; any model the service lists works. */
+	readonly model: string;
+	readonly keyUrl: string;
+	readonly note: string;
+}
+
+/** Hosted services whose chat-completions endpoint ran the planner end to end on 2026-10-16 (README). */
+const PRESETS: readonly Preset[] = [
+	{
+		id: "opencode-go",
+		label: "OpenCode Go",
+		baseUrl: "https://opencode.ai/inference/go/openai/v1",
+		model: "longcat-2.0",
+		keyUrl: "https://opencode.ai/console",
+		note: "Only models on Go's chat-completions endpoint work. Its models reason before answering: if runs time out or are cut off, raise DAWNSKILL_LLM_TIMEOUT_MS and DAWNSKILL_LLM_MAX_TOKENS on the host.",
+	},
+	{
+		id: "openrouter",
+		label: "OpenRouter",
+		baseUrl: "https://openrouter.ai/api/v1",
+		model: "anthropic/claude-haiku-5.5",
+		keyUrl: "https://openrouter.ai/keys",
+		note: "Reaches Claude, GPT and open models. Choose one that lists structured outputs among its supported parameters.",
+	},
+];
+const CUSTOM = "custom";
+
 function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
 	const savedKey = llm.source === "app" && llm.hasApiKey;
+	const [preset, setPreset] = useState(() => PRESETS.find((p) => p.baseUrl === llm.baseUrl)?.id ?? CUSTOM);
+	const chosen = PRESETS.find((p) => p.id === preset);
 	const [baseUrl, setBaseUrl] = useState(llm.baseUrl ?? "");
 	const [model, setModel] = useState(llm.source === "app" ? (llm.model ?? "") : "");
 	const [apiKey, setApiKey] = useState("");
@@ -91,6 +124,13 @@ function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
+	const choose = (id: string): void => {
+		setPreset(id);
+		const next = PRESETS.find((p) => p.id === id);
+		if (next === undefined) return;
+		setBaseUrl(next.baseUrl);
+		setModel(next.model);
+	};
 	const run = async (action: () => Promise<{ ok: true } | { ok: false; message: string }>): Promise<void> => {
 		setBusy(true);
 		setError(null);
@@ -125,8 +165,8 @@ function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
 				<p class="error">No model configured — planning is unavailable; manual tasks still work.</p>
 			)}
 			<p class="muted">
-				Any OpenAI-compatible server with structured outputs works: llama.cpp, Ollama, vLLM or a hosted provider. The
-				API key is stored on the host and never shown again.
+				Choose a hosted service or enter the URL of any OpenAI-compatible server with structured outputs: llama.cpp,
+				Ollama, vLLM or another provider. The API key is stored on the host and never shown again.
 				{llm.source === "env" ? " Settings saved here take precedence over the environment variables." : null}
 			</p>
 			<form
@@ -137,18 +177,40 @@ function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
 				}}
 			>
 				<label>
-					Base URL (including the version segment)
-					<input
-						type="url"
-						required
-						value={baseUrl}
-						placeholder="http://localhost:8080/v1"
-						onInput={(e) => setBaseUrl(e.currentTarget.value)}
-					/>
+					Service
+					<select value={preset} onChange={(e) => choose(e.currentTarget.value)}>
+						{PRESETS.map((p) => (
+							<option key={p.id} value={p.id}>
+								{p.label}
+							</option>
+						))}
+						<option value={CUSTOM}>Custom URL</option>
+					</select>
 				</label>
+				{chosen === undefined ? (
+					<label>
+						Base URL (including the version segment)
+						<input
+							type="url"
+							required
+							value={baseUrl}
+							placeholder="http://localhost:8080/v1"
+							onInput={(e) => setBaseUrl(e.currentTarget.value)}
+						/>
+					</label>
+				) : (
+					<p class="muted">
+						Base URL <code>{chosen.baseUrl}</code>. {chosen.note}
+					</p>
+				)}
 				<label>
 					Model
-					<input type="text" value={model} placeholder="default" onInput={(e) => setModel(e.currentTarget.value)} />
+					<input
+						type="text"
+						value={model}
+						placeholder={chosen?.model ?? "default"}
+						onInput={(e) => setModel(e.currentTarget.value)}
+					/>
 				</label>
 				<label>
 					API key
@@ -157,10 +219,25 @@ function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
 						autocomplete="off"
 						value={apiKey}
 						disabled={removeKey}
-						placeholder={savedKey ? "Saved — leave blank to keep it" : "Optional for local servers"}
+						placeholder={
+							savedKey
+								? "Saved — leave blank to keep it"
+								: chosen === undefined
+									? "Optional for local servers"
+									: "Required"
+						}
 						onInput={(e) => setApiKey(e.currentTarget.value)}
 					/>
 				</label>
+				{chosen === undefined ? null : (
+					<p class="muted">
+						Get a key at{" "}
+						<a href={chosen.keyUrl} target="_blank" rel="noreferrer">
+							{chosen.keyUrl}
+						</a>
+						.
+					</p>
+				)}
 				{savedKey ? (
 					<label>
 						<input type="checkbox" checked={removeKey} onChange={(e) => setRemoveKey(e.currentTarget.checked)} />

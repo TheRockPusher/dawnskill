@@ -70,7 +70,7 @@ The server runs its TypeScript directly through Node's type stripping, so there 
 
 The planner talks to any OpenAI-compatible `chat/completions` endpoint: llama.cpp `llama-server`, Ollama, vLLM or a hosted API.
 
-Set the base URL, model and API key in the web UI under **Settings → Model**; no restart or environment variable is needed. The host stores them in `$DATA_DIR/llm-settings.json` (file mode 0600, API key in plain text) and never returns the key to the browser. To protect it, a saved key is reused only for the URL it was entered for: changing the base URL requires entering the key again. Settings saved in the app take precedence over the variables below. **Remove saved settings** deletes the file, and the variables apply again.
+Set the connection in the web UI under **Settings → Model**; no restart or environment variable is needed. **Service** offers presets for OpenCode Go and OpenRouter, which fill in the base URL and a suggested model, or **Custom URL** for any other server. The host stores the settings in `$DATA_DIR/llm-settings.json` (file mode 0600, API key in plain text) and never returns the key to the browser. To protect it, a saved key is reused only for the URL it was entered for: changing the base URL, including switching presets, requires entering the key again. Settings saved in the app take precedence over the variables below. **Remove saved settings** deletes the file, and the variables apply again.
 
 The same connection can come from environment variables instead:
 
@@ -85,6 +85,37 @@ The same connection can come from environment variables instead:
 `DAWNSKILL_LLM_TIMEOUT_MS` and `DAWNSKILL_LLM_MAX_TOKENS` also apply to a model set in the app.
 
 The server must support structured outputs. Every request sends `response_format: { type: "json_schema", json_schema: { strict: true, … } }`, and the planner depends on that constrained decoding. If a server reports that the context is exceeded, the run fails at once with a clear error. If a reply is cut off at `max_tokens`, the planner retries with a request for a shorter answer.
+
+Every request also carries `User-Agent: dawnskill/<version>` and an `x-opencode-session` ID that is fixed for one plan run and new for the next. OpenCode Go needs the session header; other servers ignore it.
+
+### Hosted services
+
+Both presets were verified on 16 October 2026 with full planner runs at the default limits.
+
+| Service | Base URL | Suggested model | Result | API key |
+|---|---|---|---|---|
+| [OpenCode Go](https://opencode.ai/docs/go) | `https://opencode.ai/inference/go/openai/v1` | `longcat-2.0` | planned in 69–83 s, no repairs | [OpenCode console](https://opencode.ai/console) |
+| [OpenRouter](https://openrouter.ai) | `https://openrouter.ai/api/v1` | `anthropic/claude-haiku-5.5` | planned in 23 s, no repairs | [openrouter.ai/keys](https://openrouter.ai/keys) |
+
+Through OpenRouter, `openai/gpt-6.1-sol` also planned without repairs, and `deepseek/deepseek-v4.1-flash` needed two. Choose models whose supported parameters include structured outputs.
+
+The Anthropic and OpenAI APIs have no preset. Anthropic's OpenAI-compatible endpoint ignores `response_format` and rejects `temperature` below 1 on current Claude models. Current GPT models do not accept `temperature` either. Use them through OpenRouter.
+
+#### OpenCode Go models
+
+Go's models reason before they answer, and those tokens count against `max_tokens`. In one of five `longcat-2.0` test runs, a request passed the 120 s default timeout. If runs time out or are cut off, set `DAWNSKILL_LLM_TIMEOUT_MS=300000` and `DAWNSKILL_LLM_MAX_TOKENS=8192`.
+
+Results from 16 October 2026, using one planner run per model at `DAWNSKILL_LLM_MAX_TOKENS=8192`:
+
+- Planned without a repair: `longcat-2.0`, `kimi-k3`, `mimo-v2.6-pro`, `step-5-preview`, `glm-5.3-flash`.
+- `glm-5.2` needed one repair.
+- Failed:
+  - `deepseek-v4-pro` rejects `json_schema`. `deepseek-v4.1-flash` rejects it in about 40% of sessions.
+  - `kimi-k2.7-code` accepts only `temperature: 1`.
+  - `space-bunny` rejects the request.
+  - `hy4-preview` runs out of tokens.
+
+Models that Go serves through its Anthropic or Responses endpoints, such as Claude, GPT, Grok, Qwen and MiniMax, do not work here.
 
 Without a model, everything except the planner still works. `POST /api/plan` returns 503, and on the Plan page you write the draft yourself with **Write a draft manually**. It then goes through the same rating, approval and learning-step generation.
 
