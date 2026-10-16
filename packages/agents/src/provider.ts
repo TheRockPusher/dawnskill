@@ -39,10 +39,17 @@ export interface JsonRequest {
 	readonly maxTokens: number;
 }
 
+/** One provider is one conversation: every request it sends carries the same session ID. */
 export interface ChatProvider {
 	readonly model: string;
 	/** Raw JSON text of the assistant reply; parsing and validation are the caller's job. */
 	completeJson(request: JsonRequest, signal?: AbortSignal): Promise<string>;
+}
+
+export interface ProviderOptions {
+	/** Sent as `User-Agent`, e.g. `dawnskill/0.2.0`; hosted gateways such as OpenCode Go ask clients to identify themselves. */
+	readonly userAgent: string;
+	readonly fetch?: typeof fetch;
 }
 
 /** The server cannot fit the request into the model's context; retrying cannot help. */
@@ -100,9 +107,18 @@ function positiveInteger(env: Readonly<Record<string, string | undefined>>, name
 	return value;
 }
 
-export function openAiCompatibleProvider(config: LlmConfig, fetchImpl: typeof fetch = fetch): ChatProvider {
+/**
+ * Sends `x-opencode-session` with an ID fixed for this provider: OpenCode Go rejects requests without it
+ * and uses it to route a conversation to one backend for prompt caching. Other servers ignore it.
+ */
+export function openAiCompatibleProvider(config: LlmConfig, options: ProviderOptions): ChatProvider {
+	const fetchImpl = options.fetch ?? fetch;
 	const url = `${config.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-	const headers: Record<string, string> = { "content-type": "application/json" };
+	const headers: Record<string, string> = {
+		"content-type": "application/json",
+		"user-agent": options.userAgent,
+		"x-opencode-session": crypto.randomUUID(),
+	};
 	if (config.apiKey !== null) headers.authorization = `Bearer ${config.apiKey}`;
 	const redact = (text: string): string =>
 		config.apiKey === null ? text : text.replaceAll(config.apiKey, "[redacted]");

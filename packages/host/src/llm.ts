@@ -31,7 +31,7 @@ interface LlmStatus {
 }
 
 export interface Llm {
-	/** Provider for the next plan run; null when no model is configured. */
+	/** A new provider, so a new conversation session, for each plan run; null when no model is configured. */
 	provider(): ChatProvider | null;
 	status(): LlmStatus;
 	/** Persists and applies the settings; returns why they are illegal instead. In-flight runs keep their provider. */
@@ -51,22 +51,23 @@ interface LlmOptions {
 
 export function createLlm({ file, env, limits, connect }: LlmOptions): Llm {
 	let saved = readSaved(file);
-	let current = build();
-
-	function build(): { readonly config: LlmConfig; readonly provider: ChatProvider } | null {
-		const config = saved === null ? env : { ...limits, ...saved };
-		return config === null ? null : { config, provider: connect(config) };
-	}
+	const config = (): LlmConfig | null => (saved === null ? env : { ...limits, ...saved });
 
 	return {
-		provider: () => current?.provider ?? null,
-		status: () => ({
-			configured: current !== null,
-			source: saved !== null ? "app" : env !== null ? "env" : null,
-			model: current?.config.model ?? null,
-			baseUrl: saved?.baseUrl ?? null,
-			hasApiKey: current !== null && current.config.apiKey !== null,
-		}),
+		provider() {
+			const current = config();
+			return current === null ? null : connect(current);
+		},
+		status() {
+			const current = config();
+			return {
+				configured: current !== null,
+				source: saved !== null ? "app" : env !== null ? "env" : null,
+				model: current?.model ?? null,
+				baseUrl: saved?.baseUrl ?? null,
+				hasApiKey: current !== null && current.apiKey !== null,
+			};
+		},
 		save(update) {
 			const baseUrl = update.baseUrl.trim();
 			if (!isHttpUrl(baseUrl)) return `baseUrl = ${JSON.stringify(baseUrl)}; legal: an http:// or https:// URL`;
@@ -83,13 +84,11 @@ export function createLlm({ file, env, limits, connect }: LlmOptions): Llm {
 			const next: Saved = { baseUrl, apiKey, model: update.model?.trim() || DEFAULT_MODEL };
 			writeSaved(file, next);
 			saved = next;
-			current = build();
 			return null;
 		},
 		clear() {
 			rmSync(file, { force: true });
 			saved = null;
-			current = build();
 		},
 	};
 }

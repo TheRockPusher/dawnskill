@@ -100,7 +100,7 @@ function setup(
 	const custom = model === null || "completeJson" in model;
 	const provider = model === null || "completeJson" in model ? null : scriptedProvider(model);
 	const planner = custom ? model : provider;
-	/** Configs the app connected to, oldest first. */
+	/** Configs the app connected to, oldest first: one per plan run. */
 	const connected: LlmConfig[] = [];
 	const llm = createLlm({
 		file: join(dir, "llm-settings.json"),
@@ -141,7 +141,9 @@ function setup(
 		return run;
 	};
 	const view = async (): Promise<View> => (await json<View>("GET", "/api/view")).body;
-	return { store, provider, app, request, json, plan, view, connected };
+	/** The config the next plan run would connect with. */
+	const nextConfig = (): LlmConfig | undefined => (llm.provider() === null ? undefined : connected.at(-1));
+	return { store, provider, app, request, json, plan, view, connected, nextConfig };
 }
 
 describe("goal intake", () => {
@@ -398,7 +400,7 @@ describe("model settings", () => {
 		expect(statSync(join(dir, "llm-settings.json")).mode & 0o777).toBe(0o600);
 		const restarted = setup([], undefined, { dir });
 		expect((await restarted.json("GET", "/api/config")).body).toMatchObject({ llm: APP_STATUS });
-		expect(restarted.connected).toEqual([{ ...SETTINGS, ...LIMITS }]);
+		expect(restarted.nextConfig()).toEqual({ ...SETTINGS, ...LIMITS });
 		expect((await restarted.json("DELETE", "/api/settings/llm")).body).toEqual({
 			llm: { configured: true, source: "env", model: "scripted", baseUrl: null, hasApiKey: false },
 		});
@@ -408,14 +410,14 @@ describe("model settings", () => {
 	});
 
 	it("keeps the saved key only for the URL it was entered for", async () => {
-		const { json, connected } = setup([], undefined, { env: false });
+		const { json, nextConfig } = setup([], undefined, { env: false });
 		await json("PUT", "/api/settings/llm", SETTINGS);
 		const kept = await json("PUT", "/api/settings/llm", { baseUrl: SETTINGS.baseUrl, model: "gpt-y" });
 		expect(kept.body).toEqual({ llm: { ...APP_STATUS, model: "gpt-y" } });
 		const moved = await json<{ error: string }>("PUT", "/api/settings/llm", { baseUrl: "https://other.example/v1" });
 		expect(moved.status).toBe(400);
 		expect(moved.body.error).toContain("apiKey: required when baseUrl changes");
-		expect(connected.at(-1)).toEqual({ ...SETTINGS, model: "gpt-y", ...LIMITS });
+		expect(nextConfig()).toEqual({ ...SETTINGS, model: "gpt-y", ...LIMITS });
 		const cleared = await json("PUT", "/api/settings/llm", { baseUrl: SETTINGS.baseUrl, apiKey: " " });
 		expect(cleared.body).toEqual({ llm: { ...APP_STATUS, model: "default", hasApiKey: false } });
 	});

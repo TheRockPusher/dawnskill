@@ -484,6 +484,7 @@ describe("openAiCompatibleProvider", () => {
 		maxTokens: 4096,
 	};
 	const request = { system: "sys", user: "usr", schemaName: "plan_draft", schema: { type: "object" }, maxTokens: 99 };
+	const userAgent = "dawnskill/1.2.3";
 
 	function reply(content: string, finishReason = "stop"): Response {
 		return new Response(
@@ -503,12 +504,12 @@ describe("openAiCompatibleProvider", () => {
 
 	it("posts a strict json_schema chat completion with bearer auth", async () => {
 		const { fetch, seen } = capture(() => reply('{"ok":true}'));
-		const content = await openAiCompatibleProvider(config, fetch).completeJson(request);
+		const content = await openAiCompatibleProvider(config, { userAgent, fetch }).completeJson(request);
 		expect(content).toBe('{"ok":true}');
 		expect(seen).toHaveLength(1);
 		expect(seen[0]?.url).toBe("http://127.0.0.1:8080/v1/chat/completions");
 		expect(seen[0]?.init.method).toBe("POST");
-		expect(seen[0]?.init.headers).toMatchObject({ authorization: "Bearer sk-secret-123" });
+		expect(seen[0]?.init.headers).toMatchObject({ authorization: "Bearer sk-secret-123", "user-agent": userAgent });
 		expect(JSON.parse(seen[0]?.init.body as string)).toEqual({
 			model: "qwen",
 			messages: [
@@ -524,15 +525,27 @@ describe("openAiCompatibleProvider", () => {
 		});
 	});
 
+	it("keeps one session ID per provider and a new one for each provider", async () => {
+		const { fetch, seen } = capture(() => reply("{}"));
+		const run = openAiCompatibleProvider(config, { userAgent, fetch });
+		await run.completeJson(request);
+		await run.completeJson(request);
+		await openAiCompatibleProvider(config, { userAgent, fetch }).completeJson(request);
+		const sessions = seen.map(({ init }) => (init.headers as Record<string, string>)["x-opencode-session"]);
+		expect(sessions[0]).toMatch(/^[0-9a-f-]{36}$/);
+		expect(sessions[1]).toBe(sessions[0]);
+		expect(sessions[2]).not.toBe(sessions[0]);
+	});
+
 	it("caps max_tokens at the configured budget", async () => {
 		const { fetch, seen } = capture(() => reply("{}"));
-		await openAiCompatibleProvider(config, fetch).completeJson({ ...request, maxTokens: 9999 });
+		await openAiCompatibleProvider(config, { userAgent, fetch }).completeJson({ ...request, maxTokens: 9999 });
 		expect(JSON.parse(seen[0]?.init.body as string)).toMatchObject({ max_tokens: 4096 });
 	});
 
 	it("omits the authorization header without an API key", async () => {
 		const { fetch, seen } = capture(() => reply("{}"));
-		await openAiCompatibleProvider({ ...config, apiKey: null }, fetch).completeJson(request);
+		await openAiCompatibleProvider({ ...config, apiKey: null }, { userAgent, fetch }).completeJson(request);
 		expect(seen[0]?.init.headers).not.toHaveProperty("authorization");
 	});
 
@@ -544,13 +557,16 @@ describe("openAiCompatibleProvider", () => {
 	}
 
 	it("aborts when the timeout elapses", async () => {
-		const provider = openAiCompatibleProvider({ ...config, timeoutMs: 5 }, hangingFetch());
+		const provider = openAiCompatibleProvider({ ...config, timeoutMs: 5 }, { userAgent, fetch: hangingFetch() });
 		await expect(provider.completeJson(request)).rejects.toThrow("LLM request timed out after 5 ms");
 	});
 
 	it("aborts with the caller's signal", async () => {
 		const controller = new AbortController();
-		const pending = openAiCompatibleProvider(config, hangingFetch()).completeJson(request, controller.signal);
+		const pending = openAiCompatibleProvider(config, { userAgent, fetch: hangingFetch() }).completeJson(
+			request,
+			controller.signal,
+		);
 		controller.abort();
 		const error = (await pending.catch((e: unknown) => e)) as Error;
 		expect(error.name).toBe("AbortError");
@@ -559,7 +575,7 @@ describe("openAiCompatibleProvider", () => {
 	it("reports non-2xx status and a body excerpt without the API key", async () => {
 		const body = `{"error":"invalid key sk-secret-123"}${"x".repeat(1000)}`;
 		const { fetch } = capture(() => new Response(body, { status: 401 }));
-		const error = (await openAiCompatibleProvider(config, fetch)
+		const error = (await openAiCompatibleProvider(config, { userAgent, fetch })
 			.completeJson(request)
 			.catch((e: unknown) => e)) as Error;
 		expect(error).toBeInstanceOf(Error);
@@ -574,7 +590,7 @@ describe("openAiCompatibleProvider", () => {
 		const body =
 			'{"error":{"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error"}}';
 		const { fetch } = capture(() => new Response(body, { status: 400 }));
-		const error = (await openAiCompatibleProvider(config, fetch)
+		const error = (await openAiCompatibleProvider(config, { userAgent, fetch })
 			.completeJson(request)
 			.catch((e: unknown) => e)) as Error;
 		expect(error).toBeInstanceOf(ContextSizeError);
@@ -583,7 +599,7 @@ describe("openAiCompatibleProvider", () => {
 
 	it("reports a reply cut off at max_tokens as TruncatedReplyError", async () => {
 		const { fetch } = capture(() => reply('{"summary": "trunc', "length"));
-		const error = (await openAiCompatibleProvider(config, fetch)
+		const error = (await openAiCompatibleProvider(config, { userAgent, fetch })
 			.completeJson(request)
 			.catch((e: unknown) => e)) as Error;
 		expect(error).toBeInstanceOf(TruncatedReplyError);

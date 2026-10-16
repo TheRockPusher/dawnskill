@@ -25,7 +25,7 @@ const llm = createLlm({
 	file: join(dataDir, "llm-settings.json"),
 	env: llmConfigFromEnv(process.env),
 	limits: llmLimitsFromEnv(process.env),
-	connect: (config) => openAiCompatibleProvider(config),
+	connect: (config) => openAiCompatibleProvider(config, { userAgent: `dawnskill/${version}` }),
 });
 const { app, runs } = createApp({
 	store,
