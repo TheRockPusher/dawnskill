@@ -26,6 +26,8 @@ export interface App {
 	readonly runs: PlanRuns | null;
 }
 
+const IMMUTABLE = "public, max-age=31536000, immutable";
+
 export function createApp(options: AppOptions): App {
 	const { store, planner, clock, webDir, version } = options;
 	const runs = planner === null ? null : createPlanRuns(store, planner.provider, clock);
@@ -42,11 +44,18 @@ export function createApp(options: AppOptions): App {
 
 	// A missing WEB_DIR (web UI not built yet) only disables static assets; the API keeps working.
 	if (existsSync(webDir)) {
+		// Vite content-hashes every file under /assets/, so its URL never serves different bytes. Everything
+		// else (index.html above all) must be revalidated: a stale index.html points at old asset hashes.
+		app.use("*", async (c, next) => {
+			c.header("Cache-Control", c.req.path.startsWith("/assets/") ? IMMUTABLE : "no-cache");
+			await next();
+		});
 		app.use("*", serveStatic({ root: webDir }));
 	}
 
-	// SPA fallback: client-side routes get index.html.
+	// SPA fallback: client-side routes (and missing assets) get index.html, which is never cached.
 	app.get("*", async (c) => {
+		c.header("Cache-Control", "no-cache");
 		try {
 			return c.html(await readFile(join(webDir, "index.html"), "utf8"));
 		} catch {

@@ -1,6 +1,8 @@
 // JSON API under /api. The events handler is the user's only write path and the one importer of
 // `@dawnskill/core/user`; planner output only reaches the store as a pending proposal (runs.ts).
-import { type View, deriveView } from "@dawnskill/core";
+import { promisify } from "node:util";
+import { gzip as gzipCallback, gzipSync } from "node:zlib";
+import { deriveView } from "@dawnskill/core";
 import { userEvent } from "@dawnskill/core/user";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -22,29 +24,68 @@ interface ApiOptions {
 const VIEW_TTL_MS = 60_000;
 const PING_MS = 25_000;
 const MAX_BODY = 1024 * 1024;
+/** JSON bodies below this size are sent uncompressed: gzip would barely shrink them. */
+const GZIP_MIN_BYTES = 1024;
+const gzip = promisify(gzipCallback);
+
+/** The view serialized and gzipped once per (seq, refresh); every GET until then serves these bytes. */
+interface CachedView {
+	readonly seq: number;
+	readonly etag: string;
+	readonly computedAt: number;
+	readonly json: string;
+	readonly gzipped: Uint8Array<ArrayBuffer>;
+}
 
 export function createApi({ store, runs, model, clock, version }: ApiOptions): Hono {
 	const api = new Hono();
-	let cached: { readonly view: View; readonly etag: string; readonly computedAt: number } | null = null;
+	let cached: CachedView | null = null;
 
-	function currentView(): { readonly view: View; readonly etag: string } {
+	function currentView(): CachedView {
 		const now = clock();
 		const nowMs = Date.parse(now);
 		const { seq } = store.state;
-		if (cached === null || cached.view.seq !== seq || nowMs - cached.computedAt >= VIEW_TTL_MS) {
-			cached = { view: deriveView(store.state, now), etag: `"${seq}-${nowMs}"`, computedAt: nowMs };
+		if (cached === null || cached.seq !== seq || nowMs - cached.computedAt >= VIEW_TTL_MS) {
+			const json = JSON.stringify(deriveView(store.state, now));
+			cached = { seq, etag: `"${seq}-${nowMs}"`, computedAt: nowMs, json, gzipped: new Uint8Array(gzipSync(json)) };
 		}
 		return cached;
 	}
 
 	api.use("*", bodyLimit({ maxSize: MAX_BODY, onError: (c) => c.json({ error: "request body too large" }, 413) }));
 
+	// gzip the other JSON replies (export above all); /view sends its cached buffer, /stream is not JSON.
+	api.use("*", async (c, next) => {
+		await next();
+		const { res } = c;
+		if (
+			res.headers.has("Content-Encoding") ||
+			!res.headers.get("Content-Type")?.startsWith("application/json") ||
+			!acceptsGzip(c.req.header("Accept-Encoding"))
+		) {
+			return;
+		}
+		const body = new Uint8Array(await res.arrayBuffer());
+		if (body.byteLength < GZIP_MIN_BYTES) {
+			c.res = new Response(body, res);
+			return;
+		}
+		const headers = new Headers(res.headers);
+		headers.set("Content-Encoding", "gzip");
+		headers.append("Vary", "Accept-Encoding");
+		c.res = new Response(await gzip(body), { status: res.status, statusText: res.statusText, headers });
+	});
+
 	api.get("/view", (c) => {
-		const { view, etag } = currentView();
+		const { etag, json, gzipped } = currentView();
 		c.header("ETag", etag);
 		c.header("Cache-Control", "no-cache");
+		c.header("Vary", "Accept-Encoding");
 		if (c.req.header("If-None-Match") === etag) return c.body(null, 304);
-		return c.json(view);
+		c.header("Content-Type", "application/json");
+		if (json.length < GZIP_MIN_BYTES || !acceptsGzip(c.req.header("Accept-Encoding"))) return c.body(json);
+		c.header("Content-Encoding", "gzip");
+		return c.body(gzipped);
 	});
 
 	api.post("/events", async (c) => {
@@ -122,4 +163,12 @@ async function readJson(
 	} catch {
 		return { ok: false };
 	}
+}
+
+/** True when `Accept-Encoding` lists gzip without `q=0`. */
+function acceptsGzip(header: string | undefined): boolean {
+	return (header ?? "").split(",").some((entry) => {
+		const [name, ...params] = entry.split(";").map((part) => part.trim().toLowerCase());
+		return name === "gzip" && !params.some((param) => /^q=0(?:\.0*)?$/.test(param));
+	});
 }
