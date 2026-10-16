@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/TheRockPusher/dawnskill/compare/v0.2.0...v0.3.0) (2026-10-16)
+
+
+### Features
+
+* **web:** base URL presets for OpenCode Go and OpenRouter in model settings ([51a98bf](https://github.com/TheRockPusher/dawnskill/commit/51a98bff5bdc43cce2dda22f469e7d8cf4874687))
+
+
+### Bug Fixes
+
+* **agents:** send x-opencode-session and a dawnskill user agent so OpenCode Go accepts planner requests ([0b90290](https://github.com/TheRockPusher/dawnskill/commit/0b902900ba9151afff2c5bd6bc451bd148de6578))
+
 ## [0.2.0](https://github.com/TheRockPusher/dawnskill/compare/v0.1.1...v0.2.0) (2026-10-16)
 
 
