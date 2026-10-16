@@ -49,7 +49,7 @@ export function skillsSchema(taskCount: number) {
 					{
 						key: Type.String({
 							pattern: "^[a-z0-9]+(-[a-z0-9]+)*$",
-							description: "kebab-case, at most 64 chars; an existing key exactly when reusing it.",
+							description: "kebab-case, at most 64 chars.",
 						}),
 						name: Type.String({ description: "<technology or domain>: <capability>" }),
 						description: Type.String({ description: "What the skill covers and where it stops." }),

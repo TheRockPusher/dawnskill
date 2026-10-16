@@ -115,7 +115,7 @@ export async function planGoal(
 		checkTasks(state, goal, raw),
 	);
 	const draft = await generate(
-		buildSkillsPrompt(state, stage.goal, stage.tasks),
+		buildSkillsPrompt(stage.goal, stage.tasks),
 		"plan_skills",
 		skillsSchema(stage.tasks.length),
 		"skills",
@@ -186,8 +186,8 @@ function checkTasks(state: KernelState, goal: string, raw: string): Checked<Task
 
 /**
  * Stage B: skills with the task indices that need them. Requirements are derived from `neededBy`
- * (highest level per task and skill). An entry with an existing key reuses that skill: it is filled
- * from state for validation and left out of the draft. Prerequisites are hints: unknown keys are dropped.
+ * (highest level per task and skill). An entry whose key exactly matches a known skill reuses it: it is
+ * filled from state for validation and left out of the draft. Prerequisites are hints: unknown keys are dropped.
  */
 function checkSkills(state: KernelState, stage: TasksStage, raw: string): Checked<PlanDraft> {
 	const parsed = parse(raw);

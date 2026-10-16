@@ -30,7 +30,6 @@ Per task:
 const SKILLS_SYSTEM = `You identify the skills a developer needs for planned tasks, for Dawnskill, a learning-first task manager. Reply only with JSON matching the schema. The system compares each needed level with the user's level and adds learning steps for every gap.
 For each task find the 0 to 3 skills it genuinely depends on. Skip generic abilities (editor, basic git) unless the task is about them. List only skills some task needs, or prerequisites of those.
 Per skill:
-- Reuse: if an existing skill (key | name | level) matches, use its exact key; fill its other fields briefly, they are ignored.
 - key: lowercase kebab-case from the name, e.g. rust-ownership-borrowing. name: "<technology or domain>: <capability>", e.g. "Rust: ownership & borrowing".
 - Granularity: advancing ONE level must take at most 480 focused minutes on one concrete deliverable. Otherwise split into narrower skills linked by prerequisites.
 - neededBy: each task index that needs the skill, with the Dreyfus level needed to do that task unaided:
@@ -65,21 +64,18 @@ export function buildTasksPrompt(state: KernelState, input: PlannerInput): Plann
 	return { system: TASKS_SYSTEM, user };
 }
 
-/** Stage B: numbered tasks and the known skills in, skills with the tasks that need them out. */
+/**
+ * Stage B: numbered tasks in, skills with the tasks that need them out. Existing skills are not
+ * listed: small models copy unrelated keys. Reuse happens afterwards (exact key match, dedupe judge).
+ */
 export function buildSkillsPrompt(
-	state: KernelState,
 	goal: string,
 	tasks: readonly { readonly title: string; readonly doneWhen: string }[],
 ): PlannerPrompt {
-	const skills = Object.values(state.skills)
-		.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
-		.map((s) => `- ${s.key} | ${s.name} | ${s.level === null ? "unassessed" : `L${s.level}`}`);
 	const user = [
 		`Goal: ${goal}`,
 		"Tasks (index. title; done when):",
 		...tasks.map((t, i) => `${i}. ${t.title}; done when: ${t.doneWhen}`),
-		"Existing skills (key | name | level):",
-		skills.length === 0 ? "(none)" : skills.join("\n"),
 	].join("\n");
 	return { system: SKILLS_SYSTEM, user };
 }

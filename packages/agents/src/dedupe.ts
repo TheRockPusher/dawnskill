@@ -19,7 +19,7 @@ import { SAME_SKILL_SCHEMA } from "./schema.ts";
 /** Token Jaccard of key + name at or above which a pair is worth a judge call. */
 const CANDIDATE_JACCARD = 0.5;
 /** Judge calls per plan, bounding cost on large skill inventories. */
-const MAX_JUDGE_CALLS = 5;
+const MAX_JUDGE_CALLS = 8;
 const JUDGE_MAX_TOKENS = 20;
 
 const JUDGE_SYSTEM = `You compare two skill definitions from a software developer's skill inventory.

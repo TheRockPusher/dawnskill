@@ -158,10 +158,19 @@ describe("planGoal", () => {
 		});
 	});
 
-	it("lists existing skills as key | name | level in the skills stage", async () => {
+	it("does not show existing skills to the skills stage", async () => {
+		const state = stateWith([
+			{ key: "git-rebase", name: "Git: interactive rebase" },
+			{ key: "ripgrep-codebase", name: "ripgrep: codebase layout" },
+		]);
 		const provider = scriptedProvider([TASKS, SKILLS]);
-		await planGoal(provider, stateWith([{ key: "git-rebase", name: "Git: interactive rebase" }]), INPUT);
-		expect(provider.calls[1]?.user).toContain("- git-rebase | Git: interactive rebase | L2");
+		await planGoal(provider, state, INPUT);
+		const [tasks, skills] = provider.calls;
+		for (const request of [tasks, skills]) {
+			expect(request?.user).not.toContain("git-rebase");
+			expect(request?.user).not.toContain("ripgrep-codebase");
+			expect(request?.system).not.toContain("Existing skills");
+		}
 	});
 
 	it("drops forward, self and out-of-range after indices", async () => {
@@ -397,12 +406,15 @@ describe("skill deduplication", () => {
 		expect(result.remapped).toEqual({});
 	});
 
-	it("makes at most 5 judge calls per plan", async () => {
-		const similar = [1, 2, 3, 4, 5, 6, 7].map((n) => ({ key: `rust-ownership-v${n}`, name: `Rust: ownership v${n}` }));
-		const provider = scriptedProvider([TASKS, SKILLS, ...Array.from({ length: 5 }, () => '{"same": false}')]);
+	it("makes at most 8 judge calls per plan", async () => {
+		const similar = Array.from({ length: 10 }, (_, n) => ({
+			key: `rust-ownership-v${n}`,
+			name: `Rust: ownership v${n}`,
+		}));
+		const provider = scriptedProvider([TASKS, SKILLS, ...Array.from({ length: 8 }, () => '{"same": false}')]);
 		const result = await planGoal(provider, stateWith(similar), INPUT);
 		provider.assertDone();
-		expect(provider.calls).toHaveLength(7);
+		expect(provider.calls).toHaveLength(10);
 		expect(result.draft).toEqual(VALID);
 	});
 });
