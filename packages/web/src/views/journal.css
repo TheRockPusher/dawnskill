@@ -1,0 +1,46 @@
+.review-card header {
+	align-items: baseline;
+}
+.prompts {
+	margin: 0;
+	padding-left: 1.4em;
+}
+ul.plain,
+ol.criteria,
+ul.journal {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+ol.criteria li {
+	padding: 0.35em 0;
+	align-items: center;
+	border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+}
+.grow {
+	flex: 1 1 16em;
+}
+.journal-day h3 {
+	font-size: 0.95em;
+	margin: 0.8em 0 0.3em;
+}
+.journal-entry {
+	padding: 0.3em 0 0.3em 0.7em;
+	border-left: 3px solid var(--border, rgba(128, 128, 128, 0.35));
+}
+.journal-learned {
+	border-left-color: #2e9d57;
+}
+.journal-assessed {
+	border-left-color: #3a78c9;
+}
+.journal-reviewed {
+	border-left-color: #d49a1f;
+}
+tr.due td {
+	font-weight: 600;
+}
+pre {
+	white-space: pre-wrap;
+	overflow-x: auto;
+}
