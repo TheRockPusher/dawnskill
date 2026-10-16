@@ -2,17 +2,11 @@
 	"$schema": "https://unpkg.com/knip@6/schema.json",
 	"workspaces": {
 		".": {
-			"entry": ["scripts/*.mjs"]
+			"entry": ["scripts/*.mjs", "scripts/*.ts"]
 		},
 		"packages/core": {},
-		"packages/agents": {
-			"ignoreDependencies": ["@dawnskill/core", "typebox"]
-		},
-		"packages/host": {
-			"ignoreDependencies": ["@dawnskill/agents", "@dawnskill/core", "typebox"]
-		},
-		"packages/web": {
-			"ignoreDependencies": ["@dawnskill/core"]
-		}
+		"packages/agents": {},
+		"packages/host": {},
+		"packages/web": {}
 	}
 }

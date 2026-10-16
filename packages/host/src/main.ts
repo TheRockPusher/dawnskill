@@ -1,7 +1,9 @@
 import { mkdirSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { llmConfigFromEnv, openAiCompatibleProvider } from "@dawnskill/agents";
 import { serve } from "@hono/node-server";
+import { openStore } from "./db/store.ts";
 import { createApp } from "./server.ts";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
@@ -16,11 +18,20 @@ if (!Number.isInteger(port) || port < 0 || port > 65535) {
 	throw new Error(`Invalid PORT: ${process.env.PORT}`);
 }
 
-// The SQLite file lives here from the next phase on.
 mkdirSync(dataDir, { recursive: true });
+const store = openStore(join(dataDir, "dawnskill.db"));
+const llm = llmConfigFromEnv(process.env);
+const { app, runs } = createApp({
+	store,
+	planner: llm === null ? null : { provider: openAiCompatibleProvider(llm) },
+	clock: () => new Date().toISOString(),
+	webDir,
+	version,
+});
 
-const server = serve({ fetch: createApp({ version, webDir }).fetch, port, hostname }, () => {
-	console.log(`dawnskill listening on http://${hostname}:${port}`);
+const server = serve({ fetch: app.fetch, port, hostname }, () => {
+	const model = llm === null ? "no model configured (set DAWNSKILL_LLM_BASE_URL)" : `model ${llm.model}`;
+	console.log(`dawnskill ${version} listening on http://${hostname}:${port}, ${model}`);
 });
 
 function shutdown(): void {
@@ -30,7 +41,16 @@ function shutdown(): void {
 			process.exitCode = 1;
 		}
 	});
-	// Keep-alive connections can hold close() open; do not wait for them forever.
+	// Abort an in-flight planner call; its run settles as failed before the store closes. Every
+	// committed event is already durable, so closing does not wait for open event streams.
+	runs?.abort();
+	(runs?.idle() ?? Promise.resolve())
+		.then(() => store.close())
+		.catch((error: unknown) => {
+			console.error(error);
+			process.exitCode = 1;
+		});
+	// Keep-alive connections and open event streams can hold close() open; do not wait forever.
 	setTimeout(() => process.exit(), 10_000).unref();
 }
 
