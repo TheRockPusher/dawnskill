@@ -59,6 +59,14 @@ wait_healthy() {
 
 # --- start ---------------------------------------------------------------------
 start_ms=$(now_ms)
+# resolve_base_url → sets $base_url from the container's published host port.
+resolve_base_url() {
+  local port
+  port=$(docker port "$name" 3000/tcp | head -n 1 | sed 's/.*://')
+  [[ -n $port ]] || fail "could not determine published host port"
+  base_url="http://127.0.0.1:${port}"
+}
+
 if [[ -z $SMOKE_BASE_URL ]]; then
   docker volume create "$volume" >/dev/null
   # Host port 0 → Docker picks a free port; read it back below.
@@ -67,9 +75,7 @@ if [[ -z $SMOKE_BASE_URL ]]; then
     --publish "127.0.0.1::3000" \
     "$image" >/dev/null
 
-  port=$(docker port "$name" 3000/tcp | head -n 1 | sed 's/.*://')
-  [[ -n $port ]] || fail "could not determine published host port"
-  base_url="http://127.0.0.1:${port}"
+  resolve_base_url
   echo "container ${name} on ${base_url}"
 else
   echo "external server on ${base_url} (docker steps skipped)"
@@ -152,6 +158,9 @@ expect_status "TaskStarted on blocked work task ${work_id} → 409" 409 POST /ap
 
 if [[ -z $SMOKE_BASE_URL ]]; then
   docker restart "$name" >/dev/null
+  # Docker assigns a new random host port on restart; re-read it.
+  resolve_base_url
+  echo "restarted ${name} on ${base_url}"
   wait_healthy
   seq_after=$(json_seq "$(http_get /api/view)")
   [[ $seq_after == "$seq_before" ]] ||
