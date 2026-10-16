@@ -277,7 +277,11 @@ describe("planGoal", () => {
 	});
 
 	it("normalizes keys, references, strings, minutes, duplicates, prerequisites and resources", async () => {
-		const tasks = tasksWith(1, { title: "  Implement the fix with a regression test \n", estimateMinutes: 240.4 });
+		const tasks = tasksWith(1, {
+			title: "  Implement the fix with a regression test \n",
+			category: " Coding ",
+			estimateMinutes: 240.4,
+		});
 		const skills = skillsReply(
 			{
 				...OWNERSHIP_ENTRY,
@@ -295,12 +299,13 @@ describe("planGoal", () => {
 				key: "rust_lifetimes",
 				name: "Rust: lifetimes",
 				prerequisites: ["Rust: Ownership & Borrowing", "made-up-skill", "rust_lifetimes"],
-				neededBy: [],
+				neededBy: [{ task: 2, level: 1 }],
 			},
 		);
 		const { draft, attempts } = await planGoal(scriptedProvider([tasks, skills]), initialState(), INPUT);
 		expect(attempts).toBe(2);
-		expect(draft.tasks).toEqual(VALID.tasks);
+		expect(draft.tasks.slice(0, 2)).toEqual(VALID.tasks.slice(0, 2));
+		expect(draft.tasks[2]?.requires).toEqual([{ skill: "rust-lifetimes", level: 1 }]);
 		expect(draft.skills.map((s) => s.key)).toEqual(["rust-ownership-borrowing", "rust-lifetimes"]);
 		expect(draft.skills[0]).toEqual(OWNERSHIP);
 		expect(draft.skills[1]?.prerequisites).toEqual(["rust-ownership-borrowing"]);
@@ -312,8 +317,8 @@ describe("planGoal", () => {
 			key: "git-rebase",
 			name: "x",
 			description: "",
-			concepts: ["x"],
-			retrievalPrompts: ["x"],
+			concepts: ["x", "y"],
+			retrievalPrompts: ["x?", "y?"],
 			practiceMinutes: 5,
 			prerequisites: ["no-such-skill"],
 			resources: [],
@@ -322,6 +327,48 @@ describe("planGoal", () => {
 		const { draft } = await planGoal(scriptedProvider([TASKS, skillsReply(OWNERSHIP_ENTRY, minimal)]), state, INPUT);
 		expect(draft.skills).toEqual([OWNERSHIP]);
 		expect(draft.tasks[2]?.requires).toEqual([{ skill: "git-rebase", level: 2 }]);
+	});
+
+	it("lowercases categories so estimate reference classes match", async () => {
+		const { draft } = await planGoal(
+			scriptedProvider([tasksWith(0, { category: "Data Processing" }), SKILLS]),
+			initialState(),
+			INPUT,
+		);
+		expect(draft.tasks[0]?.category).toBe("data processing");
+	});
+
+	it("enforces the prompt's counts in the schemas", async () => {
+		const provider = scriptedProvider([TASKS, SKILLS]);
+		await planGoal(provider, initialState(), INPUT);
+		expect(provider.calls[0]?.schema).toMatchObject({ properties: { tasks: { minItems: 3, maxItems: 12 } } });
+		expect(provider.calls[1]?.schema).toMatchObject({
+			properties: {
+				skills: {
+					items: {
+						properties: {
+							concepts: { minItems: 2 },
+							retrievalPrompts: { minItems: 2, maxItems: 4 },
+							neededBy: { minItems: 1, maxItems: 3 },
+						},
+					},
+				},
+			},
+		});
+	});
+
+	it("repairs too few tasks, concepts, prompts and needing tasks", async () => {
+		const reply = JSON.parse(TASKS) as { summary: string; tasks: unknown[] };
+		const oneTask = JSON.stringify({ ...reply, tasks: reply.tasks.slice(0, 1) });
+		const thin = skillsReply({ ...OWNERSHIP_ENTRY, concepts: ["one"], retrievalPrompts: ["one?"], neededBy: [] });
+		const provider = scriptedProvider([oneTask, TASKS, thin, SKILLS]);
+		const result = await planGoal(provider, initialState(), INPUT);
+		expect(result.attempts).toBe(4);
+		expect(provider.calls[1]?.user).toContain("1. tasks = array(1): must not have fewer than 3 items");
+		const repair = provider.calls[3]?.user ?? "";
+		expect(repair).toContain("skills[0].concepts = array(1): must not have fewer than 2 items");
+		expect(repair).toContain("skills[0].retrievalPrompts = array(1): must not have fewer than 2 items");
+		expect(repair).toContain("skills[0].neededBy = array(0): must not have fewer than 1 items");
 	});
 
 	it("keeps a context-size failure fatal: no repair, a clear PlannerError", async () => {
@@ -374,7 +421,13 @@ describe("planGoal", () => {
 describe("skill deduplication", () => {
 	const existing = { key: "rust-ownership", name: "Rust: ownership" };
 	const lifetimes = { ...OWNERSHIP, key: "rust-lifetimes", name: "Rust: lifetimes", prerequisites: [OWNERSHIP.key] };
-	const draft: PlanDraft = { ...VALID, skills: [OWNERSHIP, lifetimes] };
+	const draft: PlanDraft = {
+		...VALID,
+		skills: [OWNERSHIP, lifetimes],
+		tasks: VALID.tasks.map((t, i) =>
+			i === 1 ? { ...t, requires: [...t.requires, { skill: lifetimes.key, level: 2 as const }] } : t,
+		),
+	};
 
 	it("remaps a draft skill to the existing key when the judge says yes", async () => {
 		const provider = scriptedProvider([...planResponses(draft), '{"same": true}']);
@@ -383,7 +436,10 @@ describe("skill deduplication", () => {
 		expect(result.remapped).toEqual({ [OWNERSHIP.key]: "rust-ownership" });
 		expect(result.draft.skills.map((s) => s.key)).toEqual(["rust-lifetimes"]);
 		expect(result.draft.skills[0]?.prerequisites).toEqual(["rust-ownership"]);
-		expect(result.draft.tasks[1]?.requires).toEqual([{ skill: "rust-ownership", level: 2 }]);
+		expect(result.draft.tasks[1]?.requires).toEqual([
+			{ skill: "rust-ownership", level: 2 },
+			{ skill: "rust-lifetimes", level: 2 },
+		]);
 		const judge = provider.calls[2];
 		expect(judge?.schemaName).toBe("same_skill");
 		expect(judge?.maxTokens).toBeLessThanOrEqual(32);

@@ -3,10 +3,11 @@ import type { PlanDraft } from "@dawnskill/core";
 import type { ChatProvider, JsonRequest } from "./provider.ts";
 
 /**
- * The two planner replies (tasks stage, skills stage) for `draft`. `planGoal` returns `draft` when its
- * refs are `t1..tn`, `after` names earlier tasks, and each `requires` lists draft skills in draft order
- * before existing ones. A required key that is not a draft skill becomes a minimal reuse entry, so it
- * must exist in state.
+ * The two planner replies (tasks stage, skills stage) for `draft`. `planGoal` returns `draft` when it
+ * has 3–12 tasks with refs `t1..tn`, `after` names earlier tasks, every draft skill is required by some
+ * task and has 2+ concepts and 2–4 retrieval prompts, and each `requires` lists draft skills in draft
+ * order before existing ones. A required key that is not a draft skill becomes a minimal reuse entry,
+ * so it must exist in state.
  */
 export function planResponses(draft: PlanDraft): [tasks: string, skills: string] {
 	const index = new Map(draft.tasks.map((task, i) => [task.ref, i]));
@@ -34,8 +35,8 @@ export function planResponses(draft: PlanDraft): [tasks: string, skills: string]
 			key,
 			name: key,
 			description: "",
-			concepts: [key],
-			retrievalPrompts: [key],
+			concepts: [`${key} basics`, `${key} usage`],
+			retrievalPrompts: [`Explain ${key}.`, `Use ${key}.`],
 			practiceMinutes: 60,
 			prerequisites: [],
 			resources: [],

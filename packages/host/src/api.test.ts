@@ -21,7 +21,7 @@ const draft = (goal: string): PlanDraft => ({
 			resources: [
 				{ title: "The Rust Book, ch. 4", url: "https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html" },
 			],
-			retrievalPrompts: ["When does a value move?"],
+			retrievalPrompts: ["When does a value move?", "What does the borrow checker forbid?"],
 			practiceMinutes: 120,
 		},
 	],
@@ -37,6 +37,30 @@ const draft = (goal: string): PlanDraft => ({
 			urgency: 3,
 			requires: [{ skill: "rust-ownership", level: 2 }],
 			after: [],
+		},
+		{
+			ref: "t2",
+			title: "Add persistence",
+			notes: "",
+			doneWhen: "todos survive a restart",
+			category: "coding",
+			estimateMinutes: 120,
+			importance: 3,
+			urgency: 3,
+			requires: [],
+			after: ["t1"],
+		},
+		{
+			ref: "t3",
+			title: "Publish the release",
+			notes: "",
+			doneWhen: "binary attached to a GitHub release",
+			category: "release",
+			estimateMinutes: 60,
+			importance: 3,
+			urgency: 2,
+			requires: [],
+			after: ["t2"],
 		},
 	],
 });
@@ -109,9 +133,12 @@ describe("goal intake", () => {
 		const after = await view();
 		expect(after.focus.drafts).toEqual([]);
 		const work = after.tasks.filter((t) => t.task.learning === null);
-		expect(work.map((t) => t.task.title)).toEqual(["Build the todo CLI"]);
-		expect(work[0]?.ready).toBe(false);
-		expect(work[0]?.blockedBy.length).toBeGreaterThan(0);
+		expect(work.map((t) => t.task.title).sort()).toEqual([
+			"Add persistence",
+			"Build the todo CLI",
+			"Publish the release",
+		]);
+		expect(work.every((t) => !t.ready && t.blockedBy.length > 0)).toBe(true);
 		expect(after.focus.next).toEqual([]);
 		expect(after.focus.learning.length).toBeGreaterThan(0);
 		for (const id of after.focus.learning) {

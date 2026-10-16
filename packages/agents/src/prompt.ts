@@ -28,7 +28,7 @@ Per task:
 - notes: approach hints or pitfalls; may be empty.`;
 
 const SKILLS_SYSTEM = `You identify the skills a developer needs for planned tasks, for Dawnskill, a learning-first task manager. Reply only with JSON matching the schema. The system compares each needed level with the user's level and adds learning steps for every gap.
-For each task find the 0 to 3 skills it genuinely depends on. Skip generic abilities (editor, basic git) unless the task is about them. List only skills some task needs, or prerequisites of those.
+For each task find the 0 to 3 skills it genuinely depends on. Skip generic abilities (editor, basic git) unless the task is about them. List only skills that at least one task needs.
 Per skill:
 - key: lowercase kebab-case from the name, e.g. rust-ownership-borrowing. name: "<technology or domain>: <capability>", e.g. "Rust: ownership & borrowing".
 - Granularity: advancing ONE level must take at most 480 focused minutes on one concrete deliverable. Otherwise split into narrower skills linked by prerequisites.
@@ -40,10 +40,10 @@ Per skill:
   5 Expert: handles novel edge cases intuitively; designs idiomatic APIs.
   Most tasks need 2 or 3; 4 only for subtle work in unfamiliar code; 5 almost never.
 - description: what the skill covers and where it stops.
-- concepts: the key ideas to know, as short phrases.
+- concepts: 2 or more key ideas to know, as short phrases.
 - retrievalPrompts: 2 to 4 questions answered from memory (recall, write, explain); never multiple choice or yes/no.
 - practiceMinutes: focused minutes to advance one level, 5 to 480.
-- prerequisites: keys of skills to learn first; no cycles; often empty.
+- prerequisites: keys of other listed skills to learn first; no cycles; often empty.
 - resources: official documentation only, and only URLs you are certain exist; otherwise empty. Never guess a URL.`;
 
 /** Stage A: goal and context in, tasks out. Existing categories keep estimate reference classes stable. */

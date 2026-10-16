@@ -156,6 +156,8 @@ function checkTasks(state: KernelState, goal: string, raw: string): Checked<Task
 		value.tasks.forEach((task, i) => {
 			if (!isRecord(task)) return;
 			if (typeof task.estimateMinutes === "number") task.estimateMinutes = Math.round(task.estimateMinutes);
+			// Categories key the estimate reference classes: "Data Processing" and "data processing" are one class.
+			if (typeof task.category === "string") task.category = task.category.toLowerCase();
 			if (Array.isArray(task.after)) {
 				task.after = [...new Set(task.after)].filter((a) => Number.isInteger(a) && a >= 0 && a < i);
 			}
