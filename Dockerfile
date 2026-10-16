@@ -25,6 +25,10 @@ COPY packages/core/package.json packages/core/
 COPY packages/agents/package.json packages/agents/
 COPY packages/host/package.json packages/host/
 COPY packages/web/package.json packages/web/
+# Context files keep the builder's modes; a checkout made with umask 077 (0600) would be
+# unreadable by the non-root runtime user. `chmod` works on every BuildKit version,
+# unlike symbolic `COPY --chmod`.
+RUN chmod -R u=rwX,go=rX /app
 
 # --- deps: full install (dev deps included) for the web build ----------------
 # --ignore-scripts skips the root `prepare` hook (git hooks) and dependency
@@ -36,7 +40,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 # --- build: Vite build of the SPA into packages/web/dist ---------------------
 FROM deps AS build
 COPY . .
-RUN pnpm build
+RUN chmod -R u=rwX,go=rX packages/*/src && pnpm build
 
 # --- prod-deps: runtime dependencies only ------------------------------------
 FROM manifests AS prod-deps
@@ -54,9 +58,9 @@ WORKDIR /app
 
 # Manifests, lockfile and node_modules (with workspace symlinks into packages/).
 COPY --from=prod-deps /app ./
-COPY packages/core/src packages/core/src
-COPY packages/agents/src packages/agents/src
-COPY packages/host/src packages/host/src
+COPY --from=build /app/packages/core/src packages/core/src
+COPY --from=build /app/packages/agents/src packages/agents/src
+COPY --from=build /app/packages/host/src packages/host/src
 COPY --from=build /app/packages/web/dist packages/web/dist
 
 RUN mkdir -p /data && chown node:node /data
