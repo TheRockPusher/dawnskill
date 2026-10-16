@@ -27,6 +27,8 @@ jobs:
         run: pnpm format:check
       - name: Typecheck
         run: pnpm typecheck
+      - name: Triggers in sync
+        run: pnpm triggers:check
       - name: Lint
         run: pnpm lint
       - name: Knip
