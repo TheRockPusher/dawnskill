@@ -1,0 +1,283 @@
+/* Tasks and Skills views. Shared vocabulary (panel, stack, row, grid, chip, level, state-*) lives in styles.css. */
+
+/* ── Task list ─────────────────────────────────────────────────────────── */
+
+/* Global `form` is a column; the filter bar is one left-aligned row that wraps on narrow screens. */
+form.filters {
+	flex-direction: row;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: flex-start;
+	gap: 0.4rem 1rem;
+}
+
+form.filters label {
+	flex-direction: row;
+	align-items: center;
+	gap: 0.35rem;
+	font-size: 0.85rem;
+}
+
+form.filters .grow {
+	flex: 1 1 12rem;
+}
+
+form.filters .grow input {
+	flex: 1 1 auto;
+	width: auto;
+	min-width: 8rem;
+}
+
+table.list td.num,
+table.list th.num {
+	text-align: right;
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
+
+.tasks-table td:first-child {
+	min-width: 14rem;
+}
+
+.kind {
+	font-size: 0.8rem;
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.kind-work {
+	color: var(--muted);
+}
+
+.kind-learning {
+	color: var(--state-learning);
+}
+
+.kind-learning::before {
+	content: "◆ ";
+}
+
+.kind-work::before {
+	content: "■ ";
+}
+
+.chip.status-open {
+	background: var(--subtle);
+	color: var(--fg);
+}
+
+.chip.status-doing {
+	background: var(--accent-soft);
+	color: var(--accent);
+}
+
+.chip.status-done {
+	background: var(--state-assessed-bg);
+	color: var(--state-assessed-fg);
+}
+
+.chip.status-cancelled {
+	background: var(--subtle);
+	color: var(--muted);
+	text-decoration: line-through;
+}
+
+.ready {
+	color: var(--ok);
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.blocked {
+	color: var(--state-gap);
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.blocked small {
+	font-weight: 400;
+	color: var(--muted);
+}
+
+.inherited {
+	margin-left: 0.15rem;
+	color: var(--accent);
+	font-weight: 700;
+	cursor: help;
+}
+
+/* ── Task detail ───────────────────────────────────────────────────────── */
+
+.title {
+	overflow-wrap: anywhere;
+}
+
+.inset {
+	padding: 0.6rem 0.75rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--subtle);
+}
+
+.blocked-panel {
+	border-left: 3px solid var(--state-gap);
+}
+
+.ready-panel {
+	border-left: 3px solid var(--ok);
+}
+
+.facts {
+	display: grid;
+	grid-template-columns: max-content minmax(0, 1fr);
+	gap: 0.35rem 1rem;
+	margin: 0;
+}
+
+.facts dt {
+	color: var(--muted);
+	font-size: 0.88rem;
+}
+
+.facts dd {
+	margin: 0;
+}
+
+.pre {
+	margin: 0;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+/* ── Constellation ─────────────────────────────────────────────────────── */
+
+.constellation {
+	overflow-x: auto;
+	padding-bottom: 0.25rem;
+}
+
+.constellation svg {
+	display: block;
+	font-family: inherit;
+}
+
+.constellation .edge {
+	fill: none;
+	stroke: var(--border-strong);
+	stroke-width: 1.5;
+	marker-end: url(#skill-arrow);
+}
+
+.constellation marker path {
+	fill: var(--border-strong);
+}
+
+.constellation .node rect {
+	fill: var(--panel);
+	stroke: var(--node-color);
+	stroke-width: 2;
+}
+
+.constellation .node:hover rect,
+.constellation .node:focus-visible rect {
+	fill: var(--node-tint);
+	stroke-width: 3;
+}
+
+.constellation .node:focus-visible {
+	outline: none;
+}
+
+.constellation .node-name {
+	fill: var(--fg);
+	font-size: 13px;
+	font-weight: 600;
+}
+
+.constellation .node-level {
+	fill: var(--node-color);
+	font-size: 11.5px;
+}
+
+.constellation .node.state-unassessed {
+	--node-color: var(--state-unassessed);
+	--node-tint: var(--state-unassessed-bg);
+}
+
+.constellation .node.state-gap {
+	--node-color: var(--state-gap);
+	--node-tint: var(--state-gap-bg);
+}
+
+.constellation .node.state-learning {
+	--node-color: var(--state-learning);
+	--node-tint: var(--state-learning-bg);
+}
+
+.constellation .node.state-proposed {
+	--node-color: var(--state-proposed);
+	--node-tint: var(--state-proposed-bg);
+}
+
+.constellation .node.state-assessed {
+	--node-color: var(--state-assessed);
+	--node-tint: var(--state-assessed-bg);
+}
+
+.legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.35rem 1.25rem;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+	font-size: 0.85rem;
+}
+
+/* ── Skill detail ──────────────────────────────────────────────────────── */
+
+.proposal {
+	border-left: 3px solid var(--state-proposed);
+}
+
+.timeline {
+	list-style: none;
+	margin: 0;
+	padding: 0 0 0 1rem;
+	border-left: 2px solid var(--border);
+}
+
+.timeline li {
+	position: relative;
+	padding: 0.35rem 0 0.6rem;
+}
+
+.timeline li::before {
+	content: "";
+	position: absolute;
+	left: calc(-1rem - 5px);
+	top: 0.75rem;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--accent);
+}
+
+.levels .radio {
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 0.25rem 0.5rem;
+	padding: 0.3rem 0.4rem;
+	border-radius: var(--radius);
+	cursor: pointer;
+}
+
+.levels .radio:has(input:checked) {
+	background: var(--accent-soft);
+}
+
+.levels .radio .muted {
+	flex: 1 1 100%;
+	padding-left: 1.6rem;
+	font-size: 0.88rem;
+}
