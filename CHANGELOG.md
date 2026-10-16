@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/TheRockPusher/dawnskill/compare/v0.1.1...v0.2.0) (2026-10-16)
+
+
+### Features
+
+* **host:** configure the planner model from Settings via /api/settings/llm ([9e577d6](https://github.com/TheRockPusher/dawnskill/commit/9e577d6fb45c89d501bd01a63cc4d04bfdbc6242))
+
 ## [0.1.1](https://github.com/TheRockPusher/dawnskill/compare/v0.1.0...v0.1.1) (2026-10-16)
 
 
