@@ -156,7 +156,7 @@ All tests run under Vitest (`pnpm test`, one project per package) and are determ
 | Scripted provider | Planner stages, repairs, truncation retry, context errors, normalization and skill reuse, run against `scriptedProvider`, which fails on an unexpected call and whose `assertDone()` fails if a reply was left unused | `agents/src/planner.test.ts`, `agents/src/testing.ts` |
 | Host scenarios | HTTP flows over `createApp` with an in-memory store and the scripted provider: goal intake, approval required, plan superseded, one run at a time, 400/409 shapes, planner failure, ETag caching, no model | `host/src/api.test.ts` |
 | Nightly seeds | Daily run with `FC_SEED` = the workflow run id and `FC_NUM_RUNS=2000`. The seed and a replay command are printed to the job summary | `.github/workflows/nightly.yml` |
-| Mutation testing | Weekly Stryker run over `packages/core/src` (incremental; report uploaded as an artifact) | `stryker.config.json`, `pnpm mutation` |
+| Mutation testing | Weekly Stryker run over `packages/core/src` (incremental; report uploaded as an artifact). Baseline 2026-10-16: 70.7% overall (validate 85%, mcda 80%, learning 77%, apply 72%, view 36%). `vitest.mutation.config.ts` rewrites the runner's test-name filter for vitest 5's `" > "` separator; without it every mutant runs zero tests and "survives" | `stryker.config.json`, `vitest.mutation.config.ts`, `pnpm mutation` |
 | Docker smoke | Built image: health, SPA, the offline plan → approve → learning-steps flow, the blocked start returning 409, persistence across a restart, export, non-root user | `scripts/docker-smoke.sh`, CI `docker` job |
 
 Performance is measured separately with `pnpm perf`. The results and budgets are in [performance.md](performance.md).

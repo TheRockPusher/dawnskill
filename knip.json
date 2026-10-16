@@ -2,7 +2,7 @@
 	"$schema": "https://unpkg.com/knip@6/schema.json",
 	"workspaces": {
 		".": {
-			"entry": ["scripts/*.mjs", "scripts/*.ts"]
+			"entry": ["scripts/*.mjs", "scripts/*.ts", "vitest.mutation.config.ts"]
 		},
 		"packages/core": {},
 		"packages/agents": {},

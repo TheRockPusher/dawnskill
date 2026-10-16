@@ -1,12 +1,14 @@
 {
 	"$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
 	"testRunner": "vitest",
+	"plugins": ["@stryker-mutator/vitest-runner"],
 	"vitest": {
-		"configFile": "vitest.config.ts",
-		"dir": "packages/core"
+		"configFile": "vitest.mutation.config.ts"
 	},
 	"mutate": ["packages/core/src/**/*.ts", "!packages/core/src/**/*.test.ts"],
 	"ignorePatterns": ["data", "reports", "coverage", "**/dist", "**/.tsbuild"],
+	"tsconfigFile": "stryker-no-tsconfig.json",
+	"concurrency": 3,
 	"incremental": true,
 	"incrementalFile": "reports/mutation/stryker-incremental.json",
 	"reporters": ["clear-text", "progress", "html", "json"],
