@@ -40,6 +40,8 @@ jobs:
           FC_SEED: "424242"
       - name: Build
         run: pnpm build
+      - name: Performance budgets
+        run: pnpm perf --check
 
   docker:
     needs: check

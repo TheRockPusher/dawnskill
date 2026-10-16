@@ -20,6 +20,7 @@
 		"test": "TZ=UTC vitest run",
 		"build": "pnpm --filter @dawnskill/web build",
 		"check": "pnpm format:check && pnpm typecheck && pnpm triggers:check && pnpm lint && pnpm knip && pnpm test && pnpm build",
+		"perf": "node scripts/perf.ts",
 		"start": "node packages/host/src/main.ts",
 		"dev": "pnpm run \"/^dev:/\"",
 		"dev:host": "node --watch packages/host/src/main.ts",
