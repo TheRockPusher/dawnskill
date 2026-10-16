@@ -1,8 +1,12 @@
-import type { ChatProvider } from "@dawnskill/agents";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ChatProvider, LlmConfig } from "@dawnskill/agents";
 import { planResponses, scriptedProvider } from "@dawnskill/agents/testing";
 import { AGENT_EVENTS, type EventType, type PlanDraft, type View } from "@dawnskill/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { type Store, openStore } from "./db/store.ts";
+import { createLlm } from "./llm.ts";
 import type { PlanRun } from "./runs.ts";
 import { type App, createApp } from "./server.ts";
 
@@ -66,20 +70,51 @@ const draft = (goal: string): PlanDraft => ({
 });
 
 const stores: Store[] = [];
+const dirs: string[] = [];
 afterEach(() => {
 	for (const store of stores.splice(0)) store.close();
+	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** `model`: scripted replies, a hand-written provider, or null for no model configured. */
-function setup(model: ReadonlyArray<string> | ChatProvider | null, clock: () => string = () => NOW) {
+function tempDir(): string {
+	const dir = mkdtempSync(join(tmpdir(), "dawnskill-api-"));
+	dirs.push(dir);
+	return dir;
+}
+
+const LIMITS = { timeoutMs: 1000, maxTokens: 4096 };
+/** What DAWNSKILL_LLM_* would configure; `env: false` starts without it. */
+const ENV: LlmConfig = { baseUrl: "http://127.0.0.1:8080/v1", apiKey: null, model: "scripted", ...LIMITS };
+
+/**
+ * `model`: scripted replies, a hand-written provider, or null for no provider. Every configured model
+ * (environment or saved settings) connects to it. `dir` holds the saved model settings.
+ */
+function setup(
+	model: ReadonlyArray<string> | ChatProvider | null,
+	clock: () => string = () => NOW,
+	{ env = model !== null, dir = tempDir() }: { readonly env?: boolean; readonly dir?: string } = {},
+) {
 	const store = openStore(":memory:");
 	stores.push(store);
 	const custom = model === null || "completeJson" in model;
 	const provider = model === null || "completeJson" in model ? null : scriptedProvider(model);
 	const planner = custom ? model : provider;
+	/** Configs the app connected to, oldest first. */
+	const connected: LlmConfig[] = [];
+	const llm = createLlm({
+		file: join(dir, "llm-settings.json"),
+		env: env ? ENV : null,
+		limits: LIMITS,
+		connect: (config) => {
+			if (planner === null) throw new Error("setup(null) has no provider to connect");
+			connected.push(config);
+			return planner;
+		},
+	});
 	const app: App = createApp({
 		store,
-		planner: planner === null ? null : { provider: planner },
+		llm,
 		clock,
 		webDir: "/nonexistent",
 		version: "1.2.3",
@@ -99,14 +134,14 @@ function setup(model: ReadonlyArray<string> | ChatProvider | null, clock: () => 
 	const plan = async (body: object): Promise<PlanRun> => {
 		const started = await json<{ runId: string }>("POST", "/api/plan", body);
 		expect(started.status).toBe(202);
-		await app.runs?.idle();
+		await app.runs.idle();
 		const runs = await json<PlanRun[]>("GET", "/api/plan/runs");
 		const run = runs.body.find((r) => r.id === started.body.runId);
 		if (run === undefined) throw new Error(`run ${started.body.runId} not listed`);
 		return run;
 	};
 	const view = async (): Promise<View> => (await json<View>("GET", "/api/view")).body;
-	return { store, provider, app, request, json, plan, view };
+	return { store, provider, app, request, json, plan, view, connected };
 }
 
 describe("goal intake", () => {
@@ -226,8 +261,8 @@ describe("plan superseded", () => {
 		const second = await json<{ code: string }>("POST", "/api/plan", { goal: "Plan B" });
 		expect(second).toEqual({ status: 409, body: expect.objectContaining({ code: "busy" }) });
 		release();
-		await app.runs?.idle();
-		expect(app.runs?.list().map((run) => run.status)).toEqual(["done"]);
+		await app.runs.idle();
+		expect(app.runs.list().map((run) => run.status)).toEqual(["done"]);
 	});
 });
 
@@ -330,21 +365,73 @@ describe("without a model", () => {
 		expect(response.body.error).toContain("DAWNSKILL_LLM_BASE_URL");
 		expect((await json("GET", "/api/config")).body).toEqual({
 			version: "1.2.3",
-			llm: { configured: false, model: null },
+			llm: { configured: false, source: null, model: null, baseUrl: null, hasApiKey: false },
 		});
 		expect((await json("GET", "/api/plan/runs")).body).toEqual([]);
 	});
 });
 
-describe("other routes", () => {
-	it("reports the configured model without its URL or key", async () => {
+describe("model settings", () => {
+	const SETTINGS = { baseUrl: "https://api.example.com/v1", model: "gpt-x", apiKey: "sk-secret" };
+	const APP_STATUS = { configured: true, source: "app", model: "gpt-x", baseUrl: SETTINGS.baseUrl, hasApiKey: true };
+
+	it("reports an environment model without its URL", async () => {
 		const { json } = setup([]);
 		expect((await json("GET", "/api/config")).body).toEqual({
 			version: "1.2.3",
-			llm: { configured: true, model: "scripted" },
+			llm: { configured: true, source: "env", model: "scripted", baseUrl: null, hasApiKey: false },
 		});
 	});
 
+	it("enables planning without environment variables and never returns the key", async () => {
+		const { json, plan, connected } = setup(planResponses(draft("Plan A")), undefined, { env: false });
+		expect((await json("POST", "/api/plan", { goal: "Plan A" })).status).toBe(503);
+		expect(await json("PUT", "/api/settings/llm", SETTINGS)).toEqual({ status: 200, body: { llm: APP_STATUS } });
+		expect(JSON.stringify((await json("GET", "/api/config")).body)).not.toContain("sk-secret");
+		expect((await plan({ goal: "Plan A" })).status).toBe("done");
+		expect(connected).toEqual([{ ...SETTINGS, ...LIMITS }]);
+	});
+
+	it("persists across restarts and overrides the environment until removed", async () => {
+		const dir = tempDir();
+		await setup([], undefined, { dir }).json("PUT", "/api/settings/llm", SETTINGS);
+		expect(statSync(join(dir, "llm-settings.json")).mode & 0o777).toBe(0o600);
+		const restarted = setup([], undefined, { dir });
+		expect((await restarted.json("GET", "/api/config")).body).toMatchObject({ llm: APP_STATUS });
+		expect(restarted.connected).toEqual([{ ...SETTINGS, ...LIMITS }]);
+		expect((await restarted.json("DELETE", "/api/settings/llm")).body).toEqual({
+			llm: { configured: true, source: "env", model: "scripted", baseUrl: null, hasApiKey: false },
+		});
+		expect((await setup([], undefined, { dir }).json("GET", "/api/config")).body).toMatchObject({
+			llm: { source: "env" },
+		});
+	});
+
+	it("keeps the saved key only for the URL it was entered for", async () => {
+		const { json, connected } = setup([], undefined, { env: false });
+		await json("PUT", "/api/settings/llm", SETTINGS);
+		const kept = await json("PUT", "/api/settings/llm", { baseUrl: SETTINGS.baseUrl, model: "gpt-y" });
+		expect(kept.body).toEqual({ llm: { ...APP_STATUS, model: "gpt-y" } });
+		const moved = await json<{ error: string }>("PUT", "/api/settings/llm", { baseUrl: "https://other.example/v1" });
+		expect(moved.status).toBe(400);
+		expect(moved.body.error).toContain("apiKey: required when baseUrl changes");
+		expect(connected.at(-1)).toEqual({ ...SETTINGS, model: "gpt-y", ...LIMITS });
+		const cleared = await json("PUT", "/api/settings/llm", { baseUrl: SETTINGS.baseUrl, apiKey: " " });
+		expect(cleared.body).toEqual({ llm: { ...APP_STATUS, model: "default", hasApiKey: false } });
+	});
+
+	it("rejects a base URL that is not http(s) and keeps the current settings", async () => {
+		const { json } = setup([], undefined, { env: false });
+		for (const baseUrl of ["ftp://example.com/v1", "localhost:8080/v1", ""]) {
+			const response = await json<{ error: string }>("PUT", "/api/settings/llm", { baseUrl });
+			expect(response.status).toBe(400);
+			expect(response.body.error).toContain("invalid model settings");
+		}
+		expect((await json("GET", "/api/config")).body).toMatchObject({ llm: { configured: false } });
+	});
+});
+
+describe("other routes", () => {
 	it("exports every stored event as an attachment", async () => {
 		const { app, json } = setup(null);
 		const criteriaRank = ["urgency", "importance", "unblocks", "effort", "age"];
@@ -378,7 +465,7 @@ describe("other routes", () => {
 		};
 		await until('event: change\ndata: {"seq":0}\n\n');
 		expect((await json("POST", "/api/plan", { goal: "Plan A" })).status).toBe(202);
-		await app.runs?.idle();
+		await app.runs.idle();
 		await until('event: change\ndata: {"seq":1}\n\n');
 		await until('"status":"done"');
 		expect(buffer).toContain('event: run\ndata: {"id":"R1","goal":"Plan A","status":"running"');

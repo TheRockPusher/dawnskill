@@ -116,6 +116,8 @@ The reducer, the generated SQLite triggers, the trigger tests and the web UI (wh
 
 The host runs one planner run at a time in the background (`runs.ts`). The run's result becomes a `PlanProposed` event with actor `agent`. Run records (`R<n>`, the last 20) are kept in memory and published over SSE. Shutdown aborts a run that is still in flight.
 
+The model connection lives in `host/src/llm.ts` (`createLlm`). Settings saved from the web UI (`PUT /api/settings/llm`) are written atomically to `$DATA_DIR/llm-settings.json` with mode 0600 and take precedence over the `DAWNSKILL_LLM_*` environment; `DAWNSKILL_LLM_TIMEOUT_MS` and `DAWNSKILL_LLM_MAX_TOKENS` apply to both. They are not events, so the key never enters the log or an export. Saving rebuilds the provider at once; a run already in flight keeps the provider it started with. A saved key is reused only for the URL it was entered for, so changing `baseUrl` without a new `apiKey` is refused: whoever can reach the API cannot redirect the key to a server of their choosing. An unreadable settings file stops startup with its path.
+
 ## HTTP API
 
 Routes are mounted by `createApp` (`host/src/server.ts`) and `createApi` (`host/src/api.ts`). Request bodies are limited to 1 MiB (413 `{ error }` when larger). Unknown `/api/*` paths return 404 `{ "error": "not_found" }`. An unhandled error returns 500 `{ "error": "internal error" }`.
@@ -126,15 +128,19 @@ Routes are mounted by `createApp` (`host/src/server.ts`) and `createApi` (`host/
 | `GET /api/view` | optional `If-None-Match` | 200 `View`, `ETag: "<seq>-<ms>"`, `Cache-Control: no-cache`; 304 when the ETag matches | — |
 | `POST /api/events` | `EventBody` JSON (`{ "type": "TaskStarted", "taskId": "T3" }`) | 200 `{ seq }` | 400 `{ error, details[] }` (malformed JSON, unknown type, schema violation; details are JSON-pointer messages); 409 `{ code, message }` (kernel `Illegal`) |
 | `POST /api/plan` | `{ goal (1–500 chars), context? (≤ 4000), supersedes? }` | 202 `{ runId }` | 400 `{ error, details[] }`; 409 `{ code: "invalid" }` if `supersedes` is not a pending plan; 409 `{ code: "busy" }` while a run is in progress; 503 `{ error }` without a model |
-| `GET /api/plan/runs` | — | 200 `PlanRun[]`, newest first (`[]` without a model) | — |
+| `GET /api/plan/runs` | — | 200 `PlanRun[]`, newest first | — |
 | `GET /api/stream` | — | Server-sent events: `change` `{ seq }` (sent once on connect and after every committed event), `run` `PlanRun` on every run status change; a `: ping` comment every 25 s | — |
 | `GET /api/export` | — | 200 `{ format: "dawnskill-events", version, exportedAt, events: [{ seq, at, actor, body, stateHash }] }`, as an attachment | — |
-| `GET /api/config` | — | 200 `{ version, llm: { configured, model } }` | — |
+| `GET /api/config` | — | 200 `{ version, llm: LlmStatus }` | — |
+| `PUT /api/settings/llm` | `{ baseUrl (http(s) URL), model? (blank: "default"), apiKey? }`; `apiKey` omitted keeps the saved key, null or blank removes it | 200 `{ llm: LlmStatus }` | 400 `{ error, details[] }` (schema violation, URL not http(s), `apiKey` missing while `baseUrl` changes away from a saved key) |
+| `DELETE /api/settings/llm` | — | 200 `{ llm: LlmStatus }`; the environment's configuration, if any, applies again | — |
 | `GET /*` | — | static files from `WEB_DIR`, otherwise `index.html` (SPA fallback) | 404 text when the UI is not built |
 
 `View` (`core/src/analytics/view.ts`) is `{ seq, now, criteriaRank, weights, goals, tasks, skills, proposals, focus, journal, reviews, categories }`. `deriveView(state, now)` computes it. The API caches it per `seq` and recomputes after 60 s even without new events, so ages and due reviews move forward with time.
 
 `PlanRun` is `{ id, goal, status: "running" | "done" | "failed", attempts, error, errors[], proposalId, startedAt, finishedAt }`.
+
+`LlmStatus` is `{ configured, source: "app" | "env" | null, model, baseUrl, hasApiKey }`. It never contains the key, and `baseUrl` is set only for settings saved in the app.
 
 Request bodies are checked with TypeBox (`host/src/schemas.ts`): one closed schema per event variant, with structural size caps only. Every semantic rule stays in the kernel.
 
@@ -154,7 +160,7 @@ All tests run under Vitest (`pnpm test`, one project per package) and are determ
 | Trigger tests | Every status pair is accepted by the database exactly when it is in the transition table. The cases are generated from the tables, plus the completion, assessment and closed-edge rules and raw SQL that bypasses the kernel | `store.test.ts` |
 | Replay (K8) | Close and reopen reproduces a deep-equal state with matching hashes; a tampered log is refused | `store.test.ts` |
 | Scripted provider | Planner stages, repairs, truncation retry, context errors, normalization and skill reuse, run against `scriptedProvider`, which fails on an unexpected call and whose `assertDone()` fails if a reply was left unused | `agents/src/planner.test.ts`, `agents/src/testing.ts` |
-| Host scenarios | HTTP flows over `createApp` with an in-memory store and the scripted provider: goal intake, approval required, plan superseded, one run at a time, 400/409 shapes, planner failure, ETag caching, no model | `host/src/api.test.ts` |
+| Host scenarios | HTTP flows over `createApp` with an in-memory store and the scripted provider: goal intake, approval required, plan superseded, one run at a time, 400/409 shapes, planner failure, ETag caching, no model, model settings (planning enabled without environment, persistence and precedence over the environment, key kept only for its URL) | `host/src/api.test.ts` |
 | Nightly seeds | Daily run with `FC_SEED` = the workflow run id and `FC_NUM_RUNS=2000`. The seed and a replay command are printed to the job summary | `.github/workflows/nightly.yml` |
 | Mutation testing | Weekly Stryker run over `packages/core/src` (incremental; report uploaded as an artifact). Baseline 2026-10-16: 70.7% overall (validate 85%, mcda 80%, learning 77%, apply 72%, view 36%). `vitest.mutation.config.ts` rewrites the runner's test-name filter for vitest 5's `" > "` separator; without it every mutant runs zero tests and "survives" | `stryker.config.json`, `vitest.mutation.config.ts`, `pnpm mutation` |
 | Docker smoke | Built image: health, SPA, the offline plan → approve → learning-steps flow, the blocked start returning 409, persistence across a restart, export, non-root user | `scripts/docker-smoke.sh`, CI `docker` job |

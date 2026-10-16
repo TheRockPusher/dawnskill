@@ -1,6 +1,6 @@
 import { type Criterion, rocWeights, type View } from "@dawnskill/core";
 import { useState } from "preact/hooks";
-import { useApp } from "../api.ts";
+import { type LlmStatus, removeLlmSettings, saveLlmSettings, useApp } from "../api.ts";
 import { ActionButton } from "../ui.tsx";
 import "./journal.css";
 
@@ -80,33 +80,130 @@ function Criteria({ view }: { readonly view: View }) {
 	);
 }
 
+const SOURCE_LABEL = { app: "saved in this app", env: "from the host's environment variables" } as const;
+
+function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
+	const savedKey = llm.source === "app" && llm.hasApiKey;
+	const [baseUrl, setBaseUrl] = useState(llm.baseUrl ?? "");
+	const [model, setModel] = useState(llm.source === "app" ? (llm.model ?? "") : "");
+	const [apiKey, setApiKey] = useState("");
+	const [removeKey, setRemoveKey] = useState(false);
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+
+	const run = async (action: () => Promise<{ ok: true } | { ok: false; message: string }>): Promise<void> => {
+		setBusy(true);
+		setError(null);
+		const result = await action();
+		setBusy(false);
+		if (!result.ok) setError(result.message);
+	};
+	const save = (): Promise<void> =>
+		run(() =>
+			saveLlmSettings({
+				baseUrl: baseUrl.trim(),
+				model: model.trim(),
+				// Blank keeps the saved key; the host refuses that when the URL changed.
+				...(removeKey ? { apiKey: null } : apiKey.trim() === "" ? {} : { apiKey: apiKey.trim() }),
+			}),
+		);
+	const remove = (): void => {
+		const message =
+			"Remove the saved model settings and API key? Planning then uses DAWNSKILL_LLM_* on the host, if set.";
+		if (window.confirm(message)) void run(removeLlmSettings);
+	};
+
+	return (
+		<section class="panel stack">
+			<h2>Model</h2>
+			{llm.configured ? (
+				<p>
+					Planner model: <strong>{llm.model ?? "default"}</strong>
+					{llm.source === null ? null : <span class="muted"> ({SOURCE_LABEL[llm.source]})</span>}
+				</p>
+			) : (
+				<p class="error">No model configured — planning is unavailable; manual tasks still work.</p>
+			)}
+			<p class="muted">
+				Any OpenAI-compatible server with structured outputs works: llama.cpp, Ollama, vLLM or a hosted provider. The
+				API key is stored on the host and never shown again.
+				{llm.source === "env" ? " Settings saved here take precedence over the environment variables." : null}
+			</p>
+			<form
+				class="stack"
+				onSubmit={(e) => {
+					e.preventDefault();
+					void save();
+				}}
+			>
+				<label>
+					Base URL (including the version segment)
+					<input
+						type="url"
+						required
+						value={baseUrl}
+						placeholder="http://localhost:8080/v1"
+						onInput={(e) => setBaseUrl(e.currentTarget.value)}
+					/>
+				</label>
+				<label>
+					Model
+					<input type="text" value={model} placeholder="default" onInput={(e) => setModel(e.currentTarget.value)} />
+				</label>
+				<label>
+					API key
+					<input
+						type="password"
+						autocomplete="off"
+						value={apiKey}
+						disabled={removeKey}
+						placeholder={savedKey ? "Saved — leave blank to keep it" : "Optional for local servers"}
+						onInput={(e) => setApiKey(e.currentTarget.value)}
+					/>
+				</label>
+				{savedKey ? (
+					<label>
+						<input type="checkbox" checked={removeKey} onChange={(e) => setRemoveKey(e.currentTarget.checked)} />
+						Remove the saved API key
+					</label>
+				) : null}
+				<div class="row">
+					<button type="submit" class="primary" disabled={busy || baseUrl.trim() === ""}>
+						{busy ? "Saving…" : "Save model settings"}
+					</button>
+					{llm.source === "app" ? (
+						<button type="button" class="danger" disabled={busy} onClick={remove}>
+							Remove saved settings
+						</button>
+					) : null}
+					{error ? <span class="error">{error}</span> : null}
+				</div>
+			</form>
+			<details>
+				<summary>Configure with environment variables instead</summary>
+				<p>Set these before starting the host. They apply while no settings are saved here.</p>
+				<pre>
+					DAWNSKILL_LLM_BASE_URL=http://localhost:8080/v1{"\n"}DAWNSKILL_LLM_API_KEY=…{"\n"}DAWNSKILL_LLM_MODEL=…
+				</pre>
+			</details>
+		</section>
+	);
+}
+
 export function Settings({ view }: { readonly view: View }) {
 	const { config } = useApp();
 	const categories = Object.values(view.categories).sort((a, b) => a.category.localeCompare(b.category));
 	return (
 		<div class="stack">
-			<section class="panel stack">
-				<h2>Model</h2>
-				{config === null ? (
+			{config === null ? (
+				<section class="panel stack">
+					<h2>Model</h2>
 					<p class="muted">Loading…</p>
-				) : config.llm.configured ? (
-					<p>
-						Planner model: <strong>{config.llm.model ?? "default"}</strong>
-					</p>
-				) : (
-					<p class="error">No model configured — planning is unavailable; manual tasks still work.</p>
-				)}
-				<details>
-					<summary>How to configure</summary>
-					<p>
-						Set these environment variables before starting the host. Any OpenAI-compatible server works: llama.cpp,
-						Ollama, vLLM or a hosted provider.
-					</p>
-					<pre>
-						DAWNSKILL_LLM_BASE_URL=http://localhost:8080/v1{"\n"}DAWNSKILL_LLM_API_KEY=…{"\n"}DAWNSKILL_LLM_MODEL=…
-					</pre>
-				</details>
-			</section>
+				</section>
+			) : (
+				// Remount on every status change so the form shows what the host now holds.
+				<ModelSettings key={JSON.stringify(config.llm)} llm={config.llm} />
+			)}
 
 			<Criteria key={view.criteriaRank.join()} view={view} />
 

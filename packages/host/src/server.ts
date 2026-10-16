@@ -1,17 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { ChatProvider } from "@dawnskill/agents";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { createApi } from "./api.ts";
 import type { Store } from "./db/store.ts";
+import type { Llm } from "./llm.ts";
 import { type PlanRuns, createPlanRuns } from "./runs.ts";
 
 export interface AppOptions {
 	readonly store: Store;
-	/** Null when no model is configured: `POST /api/plan` answers 503. */
-	readonly planner: { readonly provider: ChatProvider } | null;
+	/** Model connection; `POST /api/plan` answers 503 while none is configured. */
+	readonly llm: Llm;
 	/** ISO-8601 UTC timestamps for events and views; injected so tests are deterministic. */
 	readonly clock: () => string;
 	/** Absolute path of the built web UI (`packages/web/dist`). */
@@ -22,15 +22,15 @@ export interface AppOptions {
 
 export interface App {
 	readonly app: Hono;
-	/** Background planner runs; null without a model. Callers await `idle()` (tests, shutdown). */
-	readonly runs: PlanRuns | null;
+	/** Background planner runs. Callers await `idle()` (tests, shutdown). */
+	readonly runs: PlanRuns;
 }
 
 const IMMUTABLE = "public, max-age=31536000, immutable";
 
 export function createApp(options: AppOptions): App {
-	const { store, planner, clock, webDir, version } = options;
-	const runs = planner === null ? null : createPlanRuns(store, planner.provider, clock);
+	const { store, llm, clock, webDir, version } = options;
+	const runs = createPlanRuns(store, clock);
 	const app = new Hono();
 
 	app.onError((error, c) => {
@@ -40,7 +40,7 @@ export function createApp(options: AppOptions): App {
 
 	app.get("/healthz", (c) => c.json({ ok: true, version }));
 
-	app.route("/api", createApi({ store, runs, model: planner?.provider.model ?? null, clock, version }));
+	app.route("/api", createApi({ store, runs, llm, clock, version }));
 
 	// A missing WEB_DIR (web UI not built yet) only disables static assets; the API keeps working.
 	if (existsSync(webDir)) {

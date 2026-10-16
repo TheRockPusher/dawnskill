@@ -147,8 +147,8 @@ function GoalIntake() {
 				</div>
 				{unconfigured ? (
 					<p class="muted small">
-						No planner model is configured on the host, so automatic planning is off. You can{" "}
-						<a href="#/plan">write a plan draft by hand</a>.
+						No planner model is configured, so automatic planning is off. <a href="#/settings">Add one in Settings</a>{" "}
+						or <a href="#/plan">write a plan draft by hand</a>.
 					</p>
 				) : null}
 			</form>

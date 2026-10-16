@@ -26,8 +26,8 @@ interface PlanInput {
 }
 
 export interface PlanRuns {
-	/** Starts a run in the background; null while another run is still in progress. */
-	start(input: PlanInput): PlanRun | null;
+	/** Starts a run against `provider` in the background; null while another run is still in progress. */
+	start(input: PlanInput, provider: ChatProvider): PlanRun | null;
 	/** Newest first, at most the last 20 runs. */
 	list(): readonly PlanRun[];
 	/** Resolves once no run is in progress. Never rejects. */
@@ -40,7 +40,7 @@ export interface PlanRuns {
 
 const KEEP = 20;
 
-export function createPlanRuns(store: Store, provider: ChatProvider, clock: () => string): PlanRuns {
+export function createPlanRuns(store: Store, clock: () => string): PlanRuns {
 	let runs: readonly PlanRun[] = [];
 	let counter = 0;
 	let active: { readonly promise: Promise<void>; readonly controller: AbortController } | null = null;
@@ -58,7 +58,7 @@ export function createPlanRuns(store: Store, provider: ChatProvider, clock: () =
 		}
 	}
 
-	async function execute(run: PlanRun, input: PlanInput, signal: AbortSignal): Promise<void> {
+	async function execute(run: PlanRun, input: PlanInput, provider: ChatProvider, signal: AbortSignal): Promise<void> {
 		let finished: PlanRun;
 		try {
 			const result = await planGoal(provider, store.state, { goal: input.goal, context: input.context }, { signal });
@@ -100,7 +100,7 @@ export function createPlanRuns(store: Store, provider: ChatProvider, clock: () =
 	}
 
 	return {
-		start(input) {
+		start(input, provider) {
 			if (active !== null) return null;
 			counter += 1;
 			const run: PlanRun = {
@@ -116,7 +116,7 @@ export function createPlanRuns(store: Store, provider: ChatProvider, clock: () =
 			};
 			publish(run);
 			const controller = new AbortController();
-			active = { controller, promise: execute(run, input, controller.signal) };
+			active = { controller, promise: execute(run, input, provider, controller.signal) };
 			return run;
 		},
 		list: () => runs,

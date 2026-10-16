@@ -16,14 +16,17 @@ const COMPLETION = Type.Object({
 	),
 });
 
-export interface LlmConfig {
+export interface LlmLimits {
+	readonly timeoutMs: number;
+	/** Upper bound on `max_tokens` for any request; size it to the model's context. */
+	readonly maxTokens: number;
+}
+
+export interface LlmConfig extends LlmLimits {
 	/** API root including the version segment, e.g. `http://127.0.0.1:8080/v1`. */
 	readonly baseUrl: string;
 	readonly apiKey: string | null;
 	readonly model: string;
-	readonly timeoutMs: number;
-	/** Upper bound on `max_tokens` for any request; size it to the model's context. */
-	readonly maxTokens: number;
 }
 
 export interface JsonRequest {
@@ -58,14 +61,14 @@ export class TruncatedReplyError extends Error {
 	}
 }
 
-const DEFAULT_MODEL = "default";
+export const DEFAULT_MODEL = "default";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_TOKENS = 4096;
 const ERROR_BODY_CHARS = 300;
 /** llama.cpp `exceed_context_size_error`, OpenAI `context_length_exceeded`, vLLM "maximum context length". */
 const CONTEXT_ERROR = /exceed_context_size|context_length_exceeded|context (?:size|length|window)/i;
 
-/** Null when `DAWNSKILL_LLM_BASE_URL` is unset or blank: the planner is disabled. */
+/** Null when `DAWNSKILL_LLM_BASE_URL` is unset or blank: no model is configured by the environment. */
 export function llmConfigFromEnv(env: Readonly<Record<string, string | undefined>>): LlmConfig | null {
 	const baseUrl = env.DAWNSKILL_LLM_BASE_URL?.trim() ?? "";
 	if (baseUrl === "") return null;
@@ -75,6 +78,13 @@ export function llmConfigFromEnv(env: Readonly<Record<string, string | undefined
 		baseUrl,
 		apiKey: apiKey === "" ? null : apiKey,
 		model: model === "" ? DEFAULT_MODEL : model,
+		...llmLimitsFromEnv(env),
+	};
+}
+
+/** Request limits; they also apply to a model configured in the app. */
+export function llmLimitsFromEnv(env: Readonly<Record<string, string | undefined>>): LlmLimits {
+	return {
 		timeoutMs: positiveInteger(env, "DAWNSKILL_LLM_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
 		maxTokens: positiveInteger(env, "DAWNSKILL_LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS),
 	};

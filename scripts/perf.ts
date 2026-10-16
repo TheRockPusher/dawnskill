@@ -26,7 +26,9 @@ import type {
 } from "../packages/core/src/index.ts";
 import { apply, deriveView, initialState } from "../packages/core/src/index.ts";
 import { userEvent } from "../packages/core/src/user.ts";
+import { llmLimitsFromEnv, openAiCompatibleProvider } from "../packages/agents/src/index.ts";
 import { openStore } from "../packages/host/src/db/store.ts";
+import { createLlm } from "../packages/host/src/llm.ts";
 import { createApp } from "../packages/host/src/server.ts";
 
 // @hono/node-server is a host dependency, not a root one: resolve it from the host package.
@@ -321,7 +323,14 @@ try {
 async function http(path: string): Promise<void> {
 	const store = openStore(path);
 	for (const event of base.events) store.apply(event);
-	const { app } = createApp({ store, planner: null, clock: () => new Date().toISOString(), webDir, version: "perf" });
+	// No model: the settings file does not exist and the environment is not read.
+	const llm = createLlm({
+		file: `${path}.llm-settings.json`,
+		env: null,
+		limits: llmLimitsFromEnv({}),
+		connect: openAiCompatibleProvider,
+	});
+	const { app } = createApp({ store, llm, clock: () => new Date().toISOString(), webDir, version: "perf" });
 	const listening = Promise.withResolvers<void>();
 	const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => listening.resolve());
 	await listening.promise;

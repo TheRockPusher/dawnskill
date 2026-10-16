@@ -38,7 +38,7 @@ docker run -p 127.0.0.1:3000:3000 -v dawnskill-data:/data ghcr.io/therockpusher/
 
 Open http://127.0.0.1:3000. The app has no authentication, so keep the port bound to localhost unless something in front of it handles access. The image runs as a non-root user, stores data in the `/data` volume and has a health check on `GET /healthz`.
 
-With [compose.yaml](compose.yaml), which builds the image locally and passes the `DAWNSKILL_LLM_*` variables ([model configuration](#model-configuration)) through from your environment or a `.env` file:
+Then set the model under **Settings → Model** ([model configuration](#model-configuration)). Alternatively, [compose.yaml](compose.yaml), which builds the image locally, passes the `DAWNSKILL_LLM_*` variables through from your environment or a `.env` file:
 
 ```sh
 DAWNSKILL_LLM_BASE_URL=http://host.docker.internal:11434/v1 DAWNSKILL_LLM_MODEL=qwen3:14b docker compose up -d
@@ -63,20 +63,26 @@ The server runs its TypeScript directly through Node's type stripping, so there 
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
 | `HOST` | `127.0.0.1` (`0.0.0.0` in the image) | Bind address |
-| `DATA_DIR` | `./data` (`/data` in the image) | Directory of `dawnskill.db` |
+| `DATA_DIR` | `./data` (`/data` in the image) | Directory of `dawnskill.db` and `llm-settings.json` |
 | `WEB_DIR` | `packages/web/dist` | Built web UI to serve |
 
 ## Model configuration
 
 The planner talks to any OpenAI-compatible `chat/completions` endpoint: llama.cpp `llama-server`, Ollama, vLLM or a hosted API.
 
+Set the base URL, model and API key in the web UI under **Settings → Model**; no restart or environment variable is needed. The host stores them in `$DATA_DIR/llm-settings.json` (file mode 0600, API key in plain text) and never returns the key to the browser. To protect it, a saved key is reused only for the URL it was entered for: changing the base URL requires entering the key again. Settings saved in the app take precedence over the variables below. **Remove saved settings** deletes the file, and the variables apply again.
+
+The same connection can come from environment variables instead:
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `DAWNSKILL_LLM_BASE_URL` | unset: planner disabled | API root including the version segment, e.g. `http://127.0.0.1:8080/v1` (llama.cpp), `http://host.docker.internal:11434/v1` (Ollama on the Docker host) |
+| `DAWNSKILL_LLM_BASE_URL` | unset: no model unless one is set in the app | API root including the version segment, e.g. `http://127.0.0.1:8080/v1` (llama.cpp), `http://host.docker.internal:11434/v1` (Ollama on the Docker host) |
 | `DAWNSKILL_LLM_API_KEY` | none | Sent as `Authorization: Bearer …`; redacted from error messages |
 | `DAWNSKILL_LLM_MODEL` | `default` | `model` field of each request |
 | `DAWNSKILL_LLM_TIMEOUT_MS` | `120000` | Per-request timeout |
 | `DAWNSKILL_LLM_MAX_TOKENS` | `4096` | Upper bound on `max_tokens` for every request. Size it to your model's context window |
+
+`DAWNSKILL_LLM_TIMEOUT_MS` and `DAWNSKILL_LLM_MAX_TOKENS` also apply to a model set in the app.
 
 The server must support structured outputs. Every request sends `response_format: { type: "json_schema", json_schema: { strict: true, … } }`, and the planner depends on that constrained decoding. If a server reports that the context is exceeded, the run fails at once with a clear error. If a reply is cut off at `max_tokens`, the planner retries with a request for a shorter answer.
 
@@ -102,13 +108,14 @@ Every constant is specified, with its sources and limits, in [docs/learning-mode
 - **Tasks**: filterable list and task pages with the priority breakdown, why the task is blocked, dependencies, learning-step details, completion history, and the start, pause, complete, cancel and reopen actions.
 - **Skills**: the skill constellation (prerequisite graph) and skill pages with levels, assessment history, self-rating, level proposals, retrieval prompts and resources.
 - **Learning**: due reviews (recalled or forgot), level confirmations, the review schedule, skill progress and a journal of everything learned, assessed, reviewed and completed.
-- **Settings**: ranking of the priority criteria and the resulting weights, model status, estimate statistics per category, and data export.
+- **Settings**: model connection (base URL, model, API key), ranking of the priority criteria and the resulting weights, estimate statistics per category, and data export.
 
 ## Data and privacy
 
 - All state lives in one SQLite file, `$DATA_DIR/dawnskill.db`, in WAL mode, so `-wal` and `-shm` files sit next to it. Back up the directory.
 - The append-only `kernel_events` table is the source of truth. The other tables are a projection of it. On every start the app replays the log and checks the result against the stored state hash, and it refuses to start if they differ.
-- `GET /api/export` (Settings → Export everything) downloads every event as JSON: the complete, replayable history.
+- `GET /api/export` (Settings → Export everything) downloads every event as JSON: the complete, replayable history. Model settings and the API key are not events, so exports never contain them.
+- Anyone who can reach the port can change the model settings, though not read the saved key: another reason to keep the port bound to localhost.
 - The server makes outbound requests only to the configured model endpoint. Those requests contain your goal and context, the names of your existing task categories and the planned task titles. When deduplicating skills, they also contain the key, name, description and concepts of existing skills.
 
 ## Development

@@ -1,9 +1,10 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { llmConfigFromEnv, openAiCompatibleProvider } from "@dawnskill/agents";
+import { llmConfigFromEnv, llmLimitsFromEnv, openAiCompatibleProvider } from "@dawnskill/agents";
 import { serve } from "@hono/node-server";
 import { openStore } from "./db/store.ts";
+import { createLlm } from "./llm.ts";
 import { createApp } from "./server.ts";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
@@ -20,18 +21,24 @@ if (!Number.isInteger(port) || port < 0 || port > 65535) {
 
 mkdirSync(dataDir, { recursive: true });
 const store = openStore(join(dataDir, "dawnskill.db"));
-const llm = llmConfigFromEnv(process.env);
+const llm = createLlm({
+	file: join(dataDir, "llm-settings.json"),
+	env: llmConfigFromEnv(process.env),
+	limits: llmLimitsFromEnv(process.env),
+	connect: (config) => openAiCompatibleProvider(config),
+});
 const { app, runs } = createApp({
 	store,
-	planner: llm === null ? null : { provider: openAiCompatibleProvider(llm) },
+	llm,
 	clock: () => new Date().toISOString(),
 	webDir,
 	version,
 });
 
 const server = serve({ fetch: app.fetch, port, hostname }, () => {
-	const model = llm === null ? "no model configured (set DAWNSKILL_LLM_BASE_URL)" : `model ${llm.model}`;
-	console.log(`dawnskill ${version} listening on http://${hostname}:${port}, ${model}`);
+	const { model, source } = llm.status();
+	const status = model === null ? "no model configured (add one in Settings)" : `model ${model} (from ${source})`;
+	console.log(`dawnskill ${version} listening on http://${hostname}:${port}, ${status}`);
 });
 
 function shutdown(): void {
@@ -43,8 +50,9 @@ function shutdown(): void {
 	});
 	// Abort an in-flight planner call; its run settles as failed before the store closes. Every
 	// committed event is already durable, so closing does not wait for open event streams.
-	runs?.abort();
-	(runs?.idle() ?? Promise.resolve())
+	runs.abort();
+	runs
+		.idle()
 		.then(() => store.close())
 		.catch((error: unknown) => {
 			console.error(error);

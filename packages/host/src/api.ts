@@ -8,14 +8,15 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { Store } from "./db/store.ts";
+import type { Llm } from "./llm.ts";
 import type { PlanRun, PlanRuns } from "./runs.ts";
-import { parseEventBody, parsePlanRequest } from "./schemas.ts";
+import { parseEventBody, parseLlmUpdate, parsePlanRequest } from "./schemas.ts";
 
 interface ApiOptions {
 	readonly store: Store;
-	/** Null when no model is configured: planning answers 503. */
-	readonly runs: PlanRuns | null;
-	readonly model: string | null;
+	readonly runs: PlanRuns;
+	/** Planning answers 503 while it has no provider. */
+	readonly llm: Llm;
 	readonly clock: () => string;
 	readonly version: string;
 }
@@ -37,7 +38,7 @@ interface CachedView {
 	readonly gzipped: Uint8Array<ArrayBuffer>;
 }
 
-export function createApi({ store, runs, model, clock, version }: ApiOptions): Hono {
+export function createApi({ store, runs, llm, clock, version }: ApiOptions): Hono {
 	const api = new Hono();
 	let cached: CachedView | null = null;
 
@@ -99,8 +100,9 @@ export function createApi({ store, runs, model, clock, version }: ApiOptions): H
 	});
 
 	api.post("/plan", async (c) => {
-		if (runs === null) {
-			return c.json({ error: "No model configured: set DAWNSKILL_LLM_BASE_URL to enable planning" }, 503);
+		const provider = llm.provider();
+		if (provider === null) {
+			return c.json({ error: "No model configured: add one in Settings or set DAWNSKILL_LLM_BASE_URL" }, 503);
 		}
 		const json = await readJson(c.req.raw);
 		if (!json.ok) return c.json({ error: "invalid JSON body", details: [] }, 400);
@@ -115,12 +117,12 @@ export function createApi({ store, runs, model, clock, version }: ApiOptions): H
 				return c.json({ code: "invalid", message }, 409);
 			}
 		}
-		const run = runs.start({ goal, context, supersedes });
+		const run = runs.start({ goal, context, supersedes }, provider);
 		if (run === null) return c.json({ code: "busy", message: "a plan run is already in progress" }, 409);
 		return c.json({ runId: run.id }, 202);
 	});
 
-	api.get("/plan/runs", (c) => c.json(runs?.list() ?? []));
+	api.get("/plan/runs", (c) => c.json(runs.list()));
 
 	api.get("/stream", (c) =>
 		streamSSE(c, async (stream) => {
@@ -130,7 +132,7 @@ export function createApi({ store, runs, model, clock, version }: ApiOptions): H
 				});
 			};
 			const unsubscribeStore = store.subscribe((seq) => send("change", { seq }));
-			const unsubscribeRuns = runs?.subscribe((run: PlanRun) => send("run", run));
+			const unsubscribeRuns = runs.subscribe((run: PlanRun) => send("run", run));
 			const ping = setInterval(() => {
 				stream.write(": ping\n\n").catch(() => {});
 			}, PING_MS);
@@ -138,7 +140,7 @@ export function createApi({ store, runs, model, clock, version }: ApiOptions): H
 			if (!stream.aborted) await new Promise<void>((resolve) => stream.onAbort(resolve));
 			clearInterval(ping);
 			unsubscribeStore();
-			unsubscribeRuns?.();
+			unsubscribeRuns();
 		}),
 	);
 
@@ -147,7 +149,22 @@ export function createApi({ store, runs, model, clock, version }: ApiOptions): H
 		return c.json({ format: "dawnskill-events", version, exportedAt: clock(), events: store.events() });
 	});
 
-	api.get("/config", (c) => c.json({ version, llm: { configured: runs !== null, model } }));
+	api.get("/config", (c) => c.json({ version, llm: llm.status() }));
+
+	api.put("/settings/llm", async (c) => {
+		const json = await readJson(c.req.raw);
+		if (!json.ok) return c.json({ error: "invalid JSON body", details: [] }, 400);
+		const parsed = parseLlmUpdate(json.value);
+		if (!parsed.ok) return c.json({ error: parsed.error, details: parsed.details }, 400);
+		const error = llm.save(parsed.value);
+		if (error !== null) return c.json({ error: `invalid model settings: ${error}`, details: [error] }, 400);
+		return c.json({ llm: llm.status() });
+	});
+
+	api.delete("/settings/llm", (c) => {
+		llm.clear();
+		return c.json({ llm: llm.status() });
+	});
 
 	api.all("*", (c) => c.json({ error: "not_found" }, 404));
 

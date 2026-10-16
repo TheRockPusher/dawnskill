@@ -128,11 +128,23 @@ const PlanRequestSchema = Type.Object(
 );
 type PlanRequest = Static<typeof PlanRequestSchema>;
 
+/** Body of `PUT /api/settings/llm`. `apiKey` omitted keeps the saved key; null or blank removes it. */
+const LlmUpdateSchema = Type.Object(
+	{
+		baseUrl: Type.String({ minLength: 1, maxLength: URL_MAX }),
+		model: Type.Optional(short),
+		apiKey: Type.Optional(nullable(Type.String({ maxLength: TEXT }))),
+	},
+	options,
+);
+export type LlmUpdate = Static<typeof LlmUpdateSchema>;
+
 const eventBody = Compile(EventBodySchema);
 const variantByType: Readonly<Record<string, Checker>> = Object.fromEntries(
 	variants.map((schema) => [schema.properties.type.const, Compile(schema)]),
 );
 const planRequest = Compile(PlanRequestSchema);
+const llmUpdate = Compile(LlmUpdateSchema);
 
 type Parsed<T> =
 	| { readonly ok: true; readonly value: T }
@@ -161,6 +173,11 @@ export function parseEventBody(value: unknown): Parsed<EventBody> {
 export function parsePlanRequest(value: unknown): Parsed<PlanRequest> {
 	if (planRequest.Check(value)) return { ok: true, value };
 	return failure("invalid plan request", describe(planRequest, value));
+}
+
+export function parseLlmUpdate(value: unknown): Parsed<LlmUpdate> {
+	if (llmUpdate.Check(value)) return { ok: true, value };
+	return failure("invalid model settings", describe(llmUpdate, value));
 }
 
 function failure(error: string, details: readonly string[]): Parsed<never> {

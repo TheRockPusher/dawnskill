@@ -14,9 +14,20 @@ export interface PlanRun {
 	readonly finishedAt: string | null;
 }
 
+/** Mirrors the host's `GET /api/config` → `llm`; the API key never leaves the host. */
+export interface LlmStatus {
+	readonly configured: boolean;
+	/** `app`: saved in Settings; `env`: DAWNSKILL_LLM_* variables on the host. */
+	readonly source: "app" | "env" | null;
+	readonly model: string | null;
+	/** Set only for settings saved in the app. */
+	readonly baseUrl: string | null;
+	readonly hasApiKey: boolean;
+}
+
 interface AppConfig {
 	readonly version: string;
-	readonly llm: { readonly configured: boolean; readonly model: string | null };
+	readonly llm: LlmStatus;
 }
 
 export type EventResult =
@@ -135,4 +146,39 @@ export async function startPlan(
 		return { ok: true, runId: json.runId ?? "" };
 	}
 	return { ok: false, message: json.error ?? json.message ?? response.statusText };
+}
+
+/**
+ * Save the planner's model connection on the host. `apiKey` undefined keeps the saved key (only
+ * allowed while the base URL is unchanged); null removes it.
+ */
+export function saveLlmSettings(settings: {
+	readonly baseUrl: string;
+	readonly model: string;
+	readonly apiKey?: string | null;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+	return updateLlm("PUT", JSON.stringify(settings));
+}
+
+/** Delete the settings saved in the app; the host's environment variables apply again. */
+export function removeLlmSettings(): Promise<{ ok: true } | { ok: false; message: string }> {
+	return updateLlm("DELETE", undefined);
+}
+
+async function updateLlm(
+	method: "PUT" | "DELETE",
+	body: string | undefined,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+	try {
+		const response = await fetch("/api/settings/llm", {
+			method,
+			...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body }),
+		});
+		const json = (await response.json()) as ApiBody & { readonly llm?: LlmStatus };
+		if (!response.ok || json.llm === undefined) return { ok: false, message: json.error ?? response.statusText };
+		if (snapshot.config !== null) publish({ config: { ...snapshot.config, llm: json.llm } });
+		return { ok: true };
+	} catch (error) {
+		return { ok: false, message: error instanceof Error ? error.message : String(error) };
+	}
 }
