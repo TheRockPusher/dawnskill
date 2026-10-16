@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/TheRockPusher/dawnskill/compare/v0.1.0...v0.1.1) (2026-10-16)
+
+
+### Bug Fixes
+
+* **docker:** make image files readable when the checkout was made with a restrictive umask ([317c8d2](https://github.com/TheRockPusher/dawnskill/commit/317c8d2419c085e5c8f4fffb5a8fa223a84e71f9))
+
 ## 0.1.0 (2026-10-16)
 
 
