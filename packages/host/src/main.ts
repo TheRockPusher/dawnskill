@@ -48,9 +48,9 @@ function shutdown(): void {
 			process.exitCode = 1;
 		}
 	});
-	// Abort an in-flight planner call; its run settles as failed before the store closes. Every
-	// committed event is already durable, so closing does not wait for open event streams.
-	runs.abort();
+	// Cancel queued runs and abort an in-flight planner call; the worker settles before the store
+	// closes. Every committed event is already durable, so closing does not wait for open event streams.
+	runs.cancelAll();
 	runs
 		.idle()
 		.then(() => store.close())

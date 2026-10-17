@@ -5,12 +5,14 @@ import { useEffect, useState } from "preact/hooks";
 export interface PlanRun {
 	readonly id: string;
 	readonly goal: string;
-	readonly status: "running" | "done" | "failed";
+	readonly status: "queued" | "running" | "done" | "failed" | "cancelled";
 	readonly attempts: number;
 	readonly error: string | null;
 	readonly errors: readonly string[];
 	readonly proposalId: string | null;
-	readonly startedAt: string;
+	readonly queuedAt: string;
+	/** Null while the run waits behind earlier runs. */
+	readonly startedAt: string | null;
 	readonly finishedAt: string | null;
 }
 
@@ -144,6 +146,17 @@ export async function startPlan(
 	if (response.status === 202) {
 		await loadRuns();
 		return { ok: true, runId: json.runId ?? "" };
+	}
+	return { ok: false, message: json.error ?? json.message ?? response.statusText };
+}
+
+/** Cancel a queued or running planner run; a running run's model request is aborted and it never proposes. */
+export async function cancelPlan(runId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+	const response = await fetch(`/api/plan/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+	const json = (await response.json()) as ApiBody;
+	if (response.ok) {
+		await loadRuns();
+		return { ok: true };
 	}
 	return { ok: false, message: json.error ?? json.message ?? response.statusText };
 }

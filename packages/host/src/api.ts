@@ -9,7 +9,7 @@ import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { Store } from "./db/store.ts";
 import type { Llm } from "./llm.ts";
-import type { PlanRun, PlanRuns } from "./runs.ts";
+import { MAX_PENDING, type PlanRun, type PlanRuns } from "./runs.ts";
 import { parseEventBody, parseLlmUpdate, parsePlanRequest } from "./schemas.ts";
 
 interface ApiOptions {
@@ -118,11 +118,21 @@ export function createApi({ store, runs, llm, clock, version }: ApiOptions): Hon
 			}
 		}
 		const run = runs.start({ goal, context, supersedes }, provider);
-		if (run === null) return c.json({ code: "busy", message: "a plan run is already in progress" }, 409);
+		if (run === null) {
+			return c.json({ code: "busy", message: `the plan queue is full (${MAX_PENDING} runs queued or running)` }, 409);
+		}
 		return c.json({ runId: run.id }, 202);
 	});
 
 	api.get("/plan/runs", (c) => c.json(runs.list()));
+
+	api.post("/plan/runs/:id/cancel", (c) => {
+		const id = c.req.param("id");
+		const result = runs.cancel(id);
+		if (result.ok) return c.json(result.run);
+		if (result.code === "not-found") return c.json({ error: `unknown plan run ${id}` }, 404);
+		return c.json({ code: "finished", message: `plan run ${id} has already finished` }, 409);
+	});
 
 	api.get("/stream", (c) =>
 		streamSSE(c, async (stream) => {

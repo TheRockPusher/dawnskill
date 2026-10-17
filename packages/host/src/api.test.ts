@@ -7,7 +7,7 @@ import { AGENT_EVENTS, type EventType, type PlanDraft, type View } from "@dawnsk
 import { afterEach, describe, expect, it } from "vitest";
 import { type Store, openStore } from "./db/store.ts";
 import { createLlm } from "./llm.ts";
-import type { PlanRun } from "./runs.ts";
+import { MAX_PENDING, type PlanRun } from "./runs.ts";
 import { type App, createApp } from "./server.ts";
 
 const NOW = "2026-10-16T09:00:00.000Z";
@@ -243,28 +243,149 @@ describe("plan superseded", () => {
 		const response = await json<{ code: string }>("POST", "/api/plan", { goal: "Plan B", supersedes: "P9" });
 		expect(response).toEqual({ status: 409, body: expect.objectContaining({ code: "invalid" }) });
 	});
+});
 
-	it("allows one run at a time", async () => {
+describe("plan queue", () => {
+	/**
+	 * Holds every request until `release()`, then answers from the script of the plan being drafted (runs are
+	 * sequential, so a request belongs to the goal of the last `plan_tasks` request). Rejects on abort unless
+	 * `ignoreAbort`. Records each plan's goal and the peak number of concurrent requests.
+	 */
+	function gatedProvider(
+		script: Readonly<Record<string, readonly string[]>>,
+		{ ignoreAbort = false }: { readonly ignoreAbort?: boolean } = {},
+	) {
 		let release = (): void => {};
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		const replies = planResponses(draft("Plan A"));
-		let call = 0;
-		const blocked: ChatProvider = {
+		const goals: string[] = [];
+		const used: Record<string, number> = {};
+		let inFlight = 0;
+		let peak = 0;
+		const provider: ChatProvider = {
 			model: "gated",
-			completeJson: async () => {
-				await gate;
-				return replies[call++] ?? "";
+			completeJson: async (request, signal) => {
+				if (request.schemaName === "plan_tasks") {
+					goals.push(Object.keys(script).find((goal) => request.user.includes(goal)) ?? "unscripted");
+				}
+				const goal = goals.at(-1) ?? "unscripted";
+				inFlight += 1;
+				peak = Math.max(peak, inFlight);
+				try {
+					await new Promise<void>((resolve, reject) => {
+						void gate.then(resolve);
+						if (!ignoreAbort) signal?.addEventListener("abort", () => reject(new Error("aborted")));
+					});
+				} finally {
+					inFlight -= 1;
+				}
+				const n = used[goal] ?? 0;
+				used[goal] = n + 1;
+				return script[goal]?.[n] ?? "";
 			},
 		};
-		const { app, json } = setup(blocked);
-		expect((await json("POST", "/api/plan", { goal: "Plan A" })).status).toBe(202);
-		const second = await json<{ code: string }>("POST", "/api/plan", { goal: "Plan B" });
-		expect(second).toEqual({ status: 409, body: expect.objectContaining({ code: "busy" }) });
-		release();
+		return { provider, release, goals, peak: () => peak };
+	}
+
+	const goalsOf = (store: Store): (string | false)[] =>
+		Object.values(store.state.proposals).map((p) => p.payload.kind === "plan" && p.payload.draft.goal);
+
+	it("queues a run submitted while another is in progress and runs them in order, one at a time", async () => {
+		const gated = gatedProvider({ "Plan A": planResponses(draft("Plan A")), "Plan B": planResponses(draft("Plan B")) });
+		const { app, json, store } = setup(gated.provider);
+		const a = await json<{ runId: string }>("POST", "/api/plan", { goal: "Plan A" });
+		const b = await json<{ runId: string }>("POST", "/api/plan", { goal: "Plan B" });
+		expect([a.status, b.status]).toEqual([202, 202]);
+		const waiting = await json<PlanRun[]>("GET", "/api/plan/runs");
+		expect(waiting.body.map((run) => [run.id, run.status, run.startedAt])).toEqual([
+			[b.body.runId, "queued", null],
+			[a.body.runId, "running", NOW],
+		]);
+		expect(gated.goals).toEqual(["Plan A"]);
+		gated.release();
 		await app.runs.idle();
-		expect(app.runs.list().map((run) => run.status)).toEqual(["done"]);
+		expect(gated.goals).toEqual(["Plan A", "Plan B"]);
+		expect(gated.peak()).toBe(1);
+		const done = app.runs.list();
+		expect(done.map((run) => run.status)).toEqual(["done", "done"]);
+		const proposals = done.map((run) => (run.proposalId === null ? undefined : store.state.proposals[run.proposalId]));
+		expect(proposals.map((p) => p?.payload.kind === "plan" && p.payload.draft.goal)).toEqual(["Plan B", "Plan A"]);
+	});
+
+	it("refuses a run once the queue is full", async () => {
+		const gated = gatedProvider({});
+		const { app, json } = setup(gated.provider);
+		for (let i = 0; i < MAX_PENDING; i++) {
+			expect((await json("POST", "/api/plan", { goal: `Plan ${i}` })).status).toBe(202);
+		}
+		const full = await json<{ code: string }>("POST", "/api/plan", { goal: "One too many" });
+		expect(full).toEqual({ status: 409, body: expect.objectContaining({ code: "busy" }) });
+		app.runs.cancelAll();
+		await app.runs.idle();
+	});
+
+	it("cancelling a queued run drops it without sending it to the model", async () => {
+		const gated = gatedProvider({ "Plan A": planResponses(draft("Plan A")), "Plan B": planResponses(draft("Plan B")) });
+		const { app, json, store } = setup(gated.provider);
+		await json("POST", "/api/plan", { goal: "Plan A" });
+		const b = await json<{ runId: string }>("POST", "/api/plan", { goal: "Plan B" });
+		const cancel = await json<PlanRun>("POST", `/api/plan/runs/${b.body.runId}/cancel`);
+		expect(cancel).toEqual({
+			status: 200,
+			body: expect.objectContaining({ id: b.body.runId, status: "cancelled", startedAt: null, finishedAt: NOW }),
+		});
+		gated.release();
+		await app.runs.idle();
+		expect(gated.goals).toEqual(["Plan A"]);
+		expect(app.runs.list().map((run) => [run.goal, run.status])).toEqual([
+			["Plan B", "cancelled"],
+			["Plan A", "done"],
+		]);
+		expect(goalsOf(store)).toEqual(["Plan A"]);
+	});
+
+	it("cancelling the running run never proposes, even if the model still answers, and the next run starts", async () => {
+		const gated = gatedProvider(
+			{ "Plan A": planResponses(draft("Plan A")), "Plan B": planResponses(draft("Plan B")) },
+			{ ignoreAbort: true },
+		);
+		const { app, json, store } = setup(gated.provider);
+		const a = await json<{ runId: string }>("POST", "/api/plan", { goal: "Plan A" });
+		await json("POST", "/api/plan", { goal: "Plan B" });
+		const cancel = await json<PlanRun>("POST", `/api/plan/runs/${a.body.runId}/cancel`);
+		expect(cancel.body).toMatchObject({ status: "cancelled", startedAt: NOW, finishedAt: NOW });
+		gated.release();
+		await app.runs.idle();
+		expect(gated.goals).toEqual(["Plan A", "Plan B"]);
+		expect(gated.peak()).toBe(1);
+		expect(app.runs.list().map((run) => [run.goal, run.status])).toEqual([
+			["Plan B", "done"],
+			["Plan A", "cancelled"],
+		]);
+		expect(goalsOf(store)).toEqual(["Plan B"]);
+	});
+
+	it("cancel answers 409 for a finished run and 404 for an unknown one", async () => {
+		const { json, plan } = setup(planResponses(draft("Plan A")));
+		const run = await plan({ goal: "Plan A" });
+		const finished = await json<{ code: string }>("POST", `/api/plan/runs/${run.id}/cancel`);
+		expect(finished).toEqual({ status: 409, body: expect.objectContaining({ code: "finished" }) });
+		expect((await json("POST", "/api/plan/runs/R99/cancel")).status).toBe(404);
+	});
+
+	it("shutdown cancels queued runs without sending them to the model and aborts the running one", async () => {
+		const gated = gatedProvider({});
+		const { app, json } = setup(gated.provider);
+		await json("POST", "/api/plan", { goal: "Plan A" });
+		await json("POST", "/api/plan", { goal: "Plan B" });
+		app.runs.cancelAll();
+		await app.runs.idle();
+		expect(gated.goals).toEqual(["unscripted"]);
+		expect(app.runs.list().map((run) => [run.goal, run.status, run.startedAt])).toEqual([
+			["Plan B", "cancelled", null],
+			["Plan A", "cancelled", NOW],
+		]);
 	});
 });
 

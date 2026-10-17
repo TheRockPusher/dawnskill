@@ -9,7 +9,7 @@ import {
 } from "@dawnskill/core";
 import type { ComponentChildren } from "preact";
 import { useState } from "preact/hooks";
-import { type EventResult, sendEvent } from "./api.ts";
+import { type EventResult, type PlanRun, cancelPlan, sendEvent } from "./api.ts";
 import type { EventBody } from "@dawnskill/core";
 
 /** Behavioural self-assessment anchors per level (docs/learning-model.md §1). */
@@ -40,6 +40,44 @@ const STATE_LABEL: Readonly<Record<SkillState, string>> = {
 
 export function SkillStateBadge({ state }: { readonly state: SkillState }) {
 	return <span class={`chip state-${state}`}>{STATE_LABEL[state]}</span>;
+}
+
+const RUN_CHIP: Readonly<Record<PlanRun["status"], string>> = {
+	queued: "state-unassessed",
+	running: "state-learning",
+	done: "state-assessed",
+	failed: "state-gap",
+	cancelled: "state-unassessed",
+};
+
+/** A planner run's status; `running` is the view's word for a run in progress. */
+export function RunStatusChip({ status, running }: { readonly status: PlanRun["status"]; readonly running: string }) {
+	return <span class={`chip ${RUN_CHIP[status]}`}>{status === "running" ? running : status}</span>;
+}
+
+/** Cancels a queued or running planner run; renders nothing once the run has finished. */
+export function CancelRunButton({ run }: { readonly run: PlanRun }) {
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+	if (run.status !== "queued" && run.status !== "running") return null;
+	return (
+		<span class="action">
+			<button
+				type="button"
+				class="secondary"
+				disabled={busy}
+				onClick={async () => {
+					setBusy(true);
+					const result = await cancelPlan(run.id);
+					setBusy(false);
+					setError(result.ok ? null : result.message);
+				}}
+			>
+				Cancel
+			</button>
+			{error ? <span class="error">{error}</span> : null}
+		</span>
+	);
 }
 
 export function taskById(view: View, id: string): TaskView | undefined {

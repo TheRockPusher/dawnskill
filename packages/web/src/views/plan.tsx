@@ -25,7 +25,17 @@ import {
 import type { ComponentChildren } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { type PlanRun, sendEvent, startPlan, useApp } from "../api.ts";
-import { ActionButton, LEVEL_ANCHORS, LevelBadge, SkillLink, TaskLink, minutes, when } from "../ui.tsx";
+import {
+	ActionButton,
+	CancelRunButton,
+	LEVEL_ANCHORS,
+	LevelBadge,
+	RunStatusChip,
+	SkillLink,
+	TaskLink,
+	minutes,
+	when,
+} from "../ui.tsx";
 import "./plan.css";
 
 const DOCS = "https://github.com/TheRockPusher/dawnskill/blob/main/docs/learning-model.md";
@@ -412,23 +422,23 @@ function PlanIndex({ view }: { readonly view: View }) {
 }
 
 function RunStatus({ view, run }: { readonly view: View; readonly run: PlanRun }) {
-	const cls = run.status === "running" ? "state-learning" : run.status === "done" ? "state-assessed" : "state-gap";
 	const proposal = run.proposalId ? view.proposals.find((p) => p.id === run.proposalId) : undefined;
 	return (
 		<div class="stack plan-run">
 			<div class="row">
-				<span class={`chip ${cls}`}>{run.status === "running" ? "drafting…" : run.status}</span>
+				<RunStatusChip status={run.status} running="drafting…" />
 				<strong>{run.goal}</strong>
 				<span class="muted">
-					started {when(run.startedAt)}
-					{run.finishedAt ? ` · finished ${when(run.finishedAt)}` : ""} · {run.attempts} attempt
-					{run.attempts === 1 ? "" : "s"}
+					{run.startedAt === null ? `queued ${when(run.queuedAt)}` : `started ${when(run.startedAt)}`}
+					{run.finishedAt ? ` · finished ${when(run.finishedAt)}` : ""}
+					{run.startedAt === null ? "" : ` · ${run.attempts} attempt${run.attempts === 1 ? "" : "s"}`}
 				</span>
 				{run.proposalId ? (
 					<a href={`#/plan/${encodeURIComponent(run.proposalId)}`}>
 						{proposal?.status === "pending" ? "Review draft" : `Draft ${run.proposalId}`}
 					</a>
 				) : null}
+				<CancelRunButton run={run} />
 			</div>
 			{run.error ? <p class="error">{run.error}</p> : null}
 			{run.errors.length > 0 ? (
@@ -449,7 +459,9 @@ function RunStatus({ view, run }: { readonly view: View; readonly run: PlanRun }
 
 function PlanRuns({ view, runs }: { readonly view: View; readonly runs: readonly PlanRun[] }) {
 	if (runs.length === 0) return null;
-	const recent = [...runs].sort((a, b) => byNewest(a.startedAt, b.startedAt)).slice(0, 5);
+	const recent = [...runs]
+		.sort((a, b) => byNewest(a.queuedAt, b.queuedAt))
+		.filter((r, i) => r.status === "queued" || r.status === "running" || i < 5);
 	return (
 		<section class="panel stack">
 			<h2>Planner runs</h2>

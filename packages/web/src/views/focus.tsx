@@ -13,9 +13,11 @@ import { useState } from "preact/hooks";
 import { type PlanRun, sendEvent, startPlan, useApp } from "../api.ts";
 import {
 	ActionButton,
+	CancelRunButton,
 	LEVEL_ANCHORS,
 	LevelBadge,
 	minutes,
+	RunStatusChip,
 	ScoreBreakdown,
 	SkillLink,
 	SkillStateBadge,
@@ -101,8 +103,8 @@ function GoalIntake() {
 		}
 	};
 
-	const recent = [...runs].sort((a, b) => (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0));
-	const shown = recent.filter((r, i) => r.status === "running" || i < 5);
+	const recent = [...runs].sort((a, b) => (a.queuedAt < b.queuedAt ? 1 : a.queuedAt > b.queuedAt ? -1 : 0));
+	const shown = recent.filter((r, i) => r.status === "queued" || r.status === "running" || i < 5);
 
 	return (
 		<section class="panel">
@@ -168,19 +170,16 @@ function RunItem({ run }: { readonly run: PlanRun }) {
 	return (
 		<li class="focus-item">
 			<div class="row">
-				<span
-					class={`chip ${run.status === "failed" ? "state-gap" : run.status === "done" ? "state-assessed" : "state-learning"}`}
-				>
-					{run.status === "running" ? "planning…" : run.status}
-				</span>
+				<RunStatusChip status={run.status} running="planning…" />
 				<strong>{run.goal}</strong>
 				<span class="muted small">
-					{attempts} · started {when(run.startedAt)}
+					{run.startedAt === null ? `queued ${when(run.queuedAt)}` : `${attempts} · started ${when(run.startedAt)}`}
 					{run.finishedAt ? ` · finished ${when(run.finishedAt)}` : ""}
 				</span>
 				{run.status === "done" && run.proposalId ? (
 					<a href={`#/plan/${encodeURIComponent(run.proposalId)}`}>Review draft →</a>
 				) : null}
+				<CancelRunButton run={run} />
 			</div>
 			{run.status === "failed" ? (
 				<div class="stack">
