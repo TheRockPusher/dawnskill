@@ -9,7 +9,7 @@ import {
 	type SkillView,
 	type View,
 } from "@dawnskill/core";
-import { useState } from "preact/hooks";
+import { useMemo, useRef, useState } from "preact/hooks";
 import { LEVEL_ANCHORS, LevelBadge, minutes, SkillLink, SkillStateBadge, TaskLink, taskById, when } from "../ui.tsx";
 import { isActive, pick, StatusChip, useSend } from "./tasks.tsx";
 import "./catalog.css";
@@ -35,47 +35,60 @@ function lines(text: string): string[] {
 
 // ── Constellation ───────────────────────────────────────────────────────────
 
-/** Approximate advance of one character of the 13px node name, for sizing without measuring. */
-const CHAR_PX = 7.5;
-const TEXT_PAD = 10;
-const NODE_MIN_W = 160;
-const NODE_MAX_W = 320;
-const LINE_H = 16;
-const COL_GAP = 64;
-const ROW_GAP = 14;
-const PAD = 12;
+/** Sky size in viewBox units; the SVG scales to the panel width. */
+const SKY_W = 960;
+const SKY_PAD_X = 80;
+const SKY_PAD_Y = 64;
+const ROW_H = 92;
+const MIN_COL_W = 150;
+/** Approximate advance of one character of the 12px star label, for wrapping without measuring. */
+const LABEL_PX = 6.6;
+const LABEL_LINE = 14;
+/** Star card width (19rem at the 15px root size) and the narrowest it may shrink to beside a star. */
+const CARD_PX = 285;
+const CARD_MIN_PX = 200;
 
-interface Placed {
+interface Star {
 	readonly sv: SkillView;
 	readonly x: number;
 	readonly y: number;
-	/** Name wrapped onto at most two lines of `perLine` characters. */
-	readonly lines: readonly string[];
+	/** Core radius: brighter (larger) stars for higher levels. */
+	readonly r: number;
+	/** Name wrapped onto at most two lines. */
+	readonly label: readonly string[];
 }
 
-/** Greedy word wrap into at most two lines; overflow on the second line ends in an ellipsis. */
-function wrapName(name: string, perLine: number): readonly string[] {
-	if (name.length <= perLine) return [name];
-	const space = name.lastIndexOf(" ", perLine);
-	const cut = space > 0 ? space : perLine;
-	const rest = name.slice(cut).trim();
-	return [name.slice(0, cut), rest.length > perLine ? `${rest.slice(0, perLine - 1)}…` : rest];
-}
-
-/** Layers left-to-right by longest prerequisite path; nodes within a layer ordered by name. */
-function layout(skills: readonly SkillView[]): {
-	readonly nodes: ReadonlyMap<string, Placed>;
-	readonly nodeW: number;
-	readonly nodeH: number;
+interface Sky {
+	readonly stars: ReadonlyMap<string, Star>;
 	readonly width: number;
 	readonly height: number;
-} {
-	const longest = Math.max(0, ...skills.map((s) => s.skill.name.length));
-	const nodeW = Math.min(NODE_MAX_W, Math.max(NODE_MIN_W, Math.ceil(longest * CHAR_PX) + TEXT_PAD * 2));
-	const perLine = Math.floor((nodeW - TEXT_PAD * 2) / CHAR_PX);
-	const wrapped = new Map(skills.map((s) => [s.skill.key, wrapName(s.skill.name, perLine)]));
-	const nameLines = Math.max(1, ...[...wrapped.values()].map((l) => l.length));
-	const nodeH = 14 + (nameLines + 1) * LINE_H;
+}
+
+/** FNV-1a hash of `text` mapped to [0, 1): a star keeps its place for as long as its key exists. */
+function unit(text: string, salt: number): number {
+	let h = 2166136261 ^ salt;
+	for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+	return (h >>> 0) / 2 ** 32;
+}
+
+/** Small seeded PRNG (mulberry32) for the background star field. */
+function random(seed: number): () => number {
+	let a = seed;
+	return () => {
+		a = (a + 0x6d2b79f5) | 0;
+		let t = Math.imul(a ^ (a >>> 15), 1 | a);
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+		return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32;
+	};
+}
+
+/**
+ * Prerequisites to the left, the skills built on them to the right: one band per longest prerequisite chain
+ * depth, then one band of lone stars (no prerequisite, nothing built on them) so no line crosses them. Bands
+ * holding many skills split into staggered columns. Within a band, skills sit near the mean height of their
+ * prerequisites (fewer crossing lines), and a stable per-key offset breaks the grid.
+ */
+function chart(skills: readonly SkillView[]): Sky {
 	const byKey = new Map(skills.map((s) => [s.skill.key, s]));
 	const depth = new Map<string, number>();
 	const visit = (key: string, trail: ReadonlySet<string>): number => {
@@ -87,100 +100,341 @@ function layout(skills: readonly SkillView[]): {
 		depth.set(key, d);
 		return d;
 	};
-	const layers: SkillView[][] = [];
-	for (const s of skills) (layers[visit(s.skill.key, new Set())] ??= []).push(s);
-	const nodes = new Map<string, Placed>();
-	let rows = 0;
-	layers.forEach((layer, col) => {
-		layer.sort((a, b) => a.skill.name.localeCompare(b.skill.name));
-		rows = Math.max(rows, layer.length);
-		layer.forEach((sv, row) => {
-			nodes.set(sv.skill.key, {
-				sv,
-				x: PAD + col * (nodeW + COL_GAP),
-				y: PAD + row * (nodeH + ROW_GAP),
-				lines: wrapped.get(sv.skill.key) ?? [sv.skill.name],
+	const bands: SkillView[][] = [];
+	const lone: SkillView[] = [];
+	for (const s of skills) {
+		const linked = [...s.skill.prerequisites, ...s.dependents].some((k) => k !== s.skill.key && byKey.has(k));
+		if (linked) (bands[visit(s.skill.key, new Set())] ??= []).push(s);
+		else lone.push(s);
+	}
+	if (lone.length > 0) bands.push(lone);
+	const perColumn = Math.max(3, Math.min(6, Math.ceil(skills.length / Math.max(bands.length, 3))));
+	const columns = bands.reduce((n, band) => n + Math.ceil(band.length / perColumn), 0);
+	const rows = Math.min(perColumn, Math.max(0, ...bands.map((b) => b.length)));
+	const width = Math.max(SKY_W, SKY_PAD_X * 2 + (columns - 1) * MIN_COL_W);
+	const height = Math.max(260, SKY_PAD_Y * 2 + (rows - 1) * ROW_H + (columns > 1 ? ROW_H / 2 : 0));
+	const colW = columns > 1 ? (width - SKY_PAD_X * 2) / (columns - 1) : 0;
+	const perLine = Math.max(10, Math.floor((Math.min(colW || width, 240) - 20) / LABEL_PX));
+	const stars = new Map<string, Star>();
+	let col = 0;
+	for (const band of bands) {
+		const anchor = (sv: SkillView): number => {
+			const ys = sv.skill.prerequisites.flatMap((p) => {
+				const star = stars.get(p);
+				return star === undefined ? [] : [star.y];
 			});
-		});
-	});
-	return {
-		nodes,
-		nodeW,
-		nodeH,
-		width: PAD * 2 + layers.length * nodeW + Math.max(0, layers.length - 1) * COL_GAP,
-		height: PAD * 2 + rows * nodeH + Math.max(0, rows - 1) * ROW_GAP,
-	};
+			return ys.length === 0 ? height / 2 : ys.reduce((a, b) => a + b, 0) / ys.length;
+		};
+		band.sort((a, b) => anchor(a) - anchor(b) || a.skill.name.localeCompare(b.skill.name));
+		for (let start = 0; start < band.length; start += perColumn, col++) {
+			const chunk = band.slice(start, start + perColumn);
+			const stagger = col % 2 === 1 ? ROW_H / 2 : 0;
+			const top = (height - (chunk.length - 1) * ROW_H) / 2 + (chunk.length < rows ? 0 : stagger - ROW_H / 4);
+			chunk.forEach((sv, row) => {
+				const { key, level, name } = sv.skill;
+				const space = name.lastIndexOf(" ", perLine);
+				const cut = name.length <= perLine ? name.length : space > 0 ? space : perLine;
+				const rest = name.slice(cut).trim();
+				const label = [name.slice(0, cut), rest.length > perLine ? `${rest.slice(0, perLine - 1).trimEnd()}…` : rest];
+				const x = columns > 1 ? SKY_PAD_X + col * colW : width / 2;
+				const jitterX = (unit(key, 1) - 0.5) * Math.min(colW * 0.25, 32);
+				const jitterY = (unit(key, 2) - 0.5) * ROW_H * 0.36;
+				stars.set(key, {
+					sv,
+					x: x + jitterX,
+					y: top + row * ROW_H + jitterY,
+					r: level === null ? 3.4 : 3 + level * 0.9,
+					label: label.filter((line) => line !== ""),
+				});
+			});
+		}
+	}
+	return { stars, width, height };
+}
+
+/** Faint background stars, fixed per sky size. */
+function starField(
+	width: number,
+	height: number,
+): readonly { x: number; y: number; r: number; o: number; t: number }[] {
+	const next = random(width * 31 + height);
+	return Array.from({ length: Math.round((width * height) / 1700) }, () => ({
+		x: next() * width,
+		y: next() * height,
+		r: 0.3 + next() ** 3 * 1.1,
+		o: 0.15 + next() * 0.55,
+		t: Math.floor(next() * 6),
+	}));
 }
 
 function Constellation({ view }: { readonly view: View }) {
-	const { nodes, nodeW, nodeH, width, height } = layout(view.skills);
-	const placed = [...nodes.values()];
+	const { stars, width, height } = useMemo(() => chart(view.skills), [view.skills]);
+	const field = useMemo(() => starField(width, height), [width, height]);
+	const [selected, setSelected] = useState<string | null>(null);
+	const starEls = useRef(new Map<string, SVGGElement>());
+	const frame = useRef<HTMLDivElement>(null);
+	const active = selected === null ? undefined : stars.get(selected);
+	const related = new Set(
+		active ? [active.sv.skill.key, ...active.sv.skill.prerequisites, ...active.sv.dependents] : [],
+	);
+	// The card opens beside the star, clear of its label, on the side with more room (in rendered px);
+	// a tether line leads back to the star. A star is only selectable after mount, so the frame is measured.
+	const frameW = frame.current?.clientWidth ?? width;
+	const scale = frameW / width;
+	const reach = active ? (Math.max(...active.label.map((l) => l.length)) * LABEL_PX) / 2 + 14 : 0;
+	const rightRoom = active ? frameW - (active.x + reach) * scale : 0;
+	const leftRoom = active ? (active.x - reach) * scale : 0;
+	const flipX = rightRoom < CARD_PX && leftRoom > rightRoom;
+	const cardX = active ? active.x + (flipX ? -reach : reach) : 0;
+	const select = (key: string) => {
+		setSelected(key);
+		starEls.current.get(key)?.focus();
+	};
+	const close = () => {
+		if (selected !== null) starEls.current.get(selected)?.focus();
+		setSelected(null);
+	};
+	const edges = [...stars.values()].flatMap((to) =>
+		to.sv.skill.prerequisites.flatMap((pre) => {
+			const from = stars.get(pre);
+			if (from === undefined) return [];
+			const dx = to.x - from.x;
+			const dy = to.y - from.y;
+			const len = Math.hypot(dx, dy) || 1;
+			const a = from.r + 7;
+			const b = to.r + 7;
+			const lit = active !== undefined && (pre === active.sv.skill.key || to.sv.skill.key === active.sv.skill.key);
+			return [
+				<line
+					key={`${pre}>${to.sv.skill.key}`}
+					class={lit ? "edge lit" : "edge"}
+					x1={from.x + (dx * a) / len}
+					y1={from.y + (dy * a) / len}
+					x2={to.x - (dx * b) / len}
+					y2={to.y - (dy * b) / len}
+				/>,
+			];
+		}),
+	);
 	return (
-		<div class="constellation">
-			<svg
-				width={width}
-				height={height}
-				viewBox={`0 0 ${width} ${height}`}
-				role="group"
-				aria-label="Skill constellation: prerequisites point to the skills that build on them"
-			>
-				<defs>
-					<marker
-						id="skill-arrow"
-						viewBox="0 0 10 10"
-						refX="10"
-						refY="5"
-						markerWidth="7"
-						markerHeight="7"
-						orient="auto"
-					>
-						<path d="M0 0L10 5L0 10z" />
-					</marker>
-				</defs>
-				{placed.flatMap(({ sv, x, y }) =>
-					sv.skill.prerequisites.flatMap((pre) => {
-						const from = nodes.get(pre);
-						if (from === undefined) return [];
-						const x1 = from.x + nodeW;
-						const y1 = from.y + nodeH / 2;
-						const y2 = y + nodeH / 2;
-						const mid = (x1 + x) / 2;
-						return [
-							<path
-								key={`${pre}>${sv.skill.key}`}
-								class="edge"
-								d={`M${x1} ${y1}C${mid} ${y1} ${mid} ${y2} ${x} ${y2}`}
-							/>,
+		<div
+			ref={frame}
+			class={active ? "sky-frame has-selection" : "sky-frame"}
+			onKeyDown={(e) => {
+				if (e.key === "Escape" && selected !== null) {
+					e.preventDefault();
+					close();
+				}
+			}}
+		>
+			<div class="sky">
+				<svg
+					viewBox={`0 0 ${width} ${height}`}
+					style={{ "--sky-min-width": `${Math.round(width * 0.72)}px` }}
+					role="group"
+					aria-label="Skill constellation: lines join each prerequisite to the skills that build on it"
+					onClick={() => setSelected(null)}
+				>
+					<defs>
+						{STATES.map((s) => (
+							<radialGradient key={s} id={`sky-glow-${s}`} class={`state-${s}`}>
+								<stop offset="0" class="glow-in" />
+								<stop offset="1" class="glow-out" />
+							</radialGradient>
+						))}
+					</defs>
+					<g aria-hidden="true">
+						{field.map((s, i) => (
+							<circle key={i} class={`dust t${s.t}`} cx={s.x} cy={s.y} r={s.r} opacity={s.o} />
+						))}
+					</g>
+					<g aria-hidden="true">{edges}</g>
+					{active ? (
+						<line
+							class="tether"
+							x1={active.x + (flipX ? -1 : 1) * (active.r + 6)}
+							y1={active.y}
+							x2={cardX}
+							y2={active.y}
+							aria-hidden="true"
+						/>
+					) : null}
+					{[...stars.values()].map(({ sv, x, y, r, label }) => {
+						const { skill } = sv;
+						const isSelected = selected === skill.key;
+						const classes = [
+							"star",
+							`state-${sv.state}`,
+							skill.level === null ? "unrated" : "",
+							isSelected ? "selected" : "",
+							active && !related.has(skill.key) ? "dim" : "",
 						];
-					}),
-				)}
-				{placed.map(({ sv, x, y, lines: nameLines }) => {
-					const { skill } = sv;
-					const level = skill.level === null ? "L? not assessed" : `L${skill.level} ${LEVEL_NAMES[skill.level]}`;
-					return (
-						<a
-							key={skill.key}
-							href={`#/skills/${encodeURIComponent(skill.key)}`}
-							class={`node state-${sv.state}`}
-							aria-label={`${skill.name}: ${level}, ${sv.state}`}
-						>
-							<title>{`${skill.name} — ${level} — ${STATE_HELP[sv.state]}`}</title>
-							<rect x={x} y={y} width={nodeW} height={nodeH} rx={8} />
-							<text x={x + TEXT_PAD} y={y + 7 + LINE_H - 4} class="node-name">
-								{nameLines.map((line, i) => (
-									<tspan key={i} x={x + TEXT_PAD} dy={i === 0 ? 0 : LINE_H}>
-										{line}
-									</tspan>
-								))}
-							</text>
-							<text x={x + TEXT_PAD} y={y + 7 + (nameLines.length + 1) * LINE_H - 4} class="node-level">
-								{level}
-							</text>
-						</a>
-					);
-				})}
-			</svg>
+						return (
+							<g
+								key={skill.key}
+								ref={(el) => {
+									if (el) starEls.current.set(skill.key, el);
+									else starEls.current.delete(skill.key);
+								}}
+								class={classes.filter(Boolean).join(" ")}
+								role="button"
+								// SVG attributes are case-sensitive and Preact sets them verbatim: `tabIndex` would not focus.
+								tabindex={0}
+								aria-label={`${skill.name}: ${skill.level === null ? "L? not assessed" : `L${skill.level} ${LEVEL_NAMES[skill.level]}`}, ${STATE_HELP[sv.state]}`}
+								aria-expanded={isSelected}
+								aria-controls={isSelected ? "star-card" : undefined}
+								onClick={(e) => {
+									e.stopPropagation();
+									setSelected(isSelected ? null : skill.key);
+								}}
+								onKeyDown={(e) => {
+									if (e.key === "Enter" || e.key === " ") {
+										e.preventDefault();
+										setSelected(isSelected ? null : skill.key);
+									}
+								}}
+							>
+								<circle class="hit" cx={x} cy={y} r={Math.max(18, r * 3)} />
+								<circle class="glow" cx={x} cy={y} r={r * 3.6} fill={`url(#sky-glow-${sv.state})`} />
+								{(skill.level ?? 0) >= 3 ? (
+									<path class="spikes" d={`M${x - r * 2.8} ${y}H${x + r * 2.8}M${x} ${y - r * 2.8}V${y + r * 2.8}`} />
+								) : null}
+								<circle class="core" cx={x} cy={y} r={r} />
+								{isSelected ? <circle class="ring" cx={x} cy={y} r={r + 7} /> : null}
+								<text class="label" x={x} y={y + r + 17} text-anchor="middle">
+									{label.map((line, i) => (
+										<tspan key={i} x={x} dy={i === 0 ? 0 : LABEL_LINE}>
+											{line}
+										</tspan>
+									))}
+								</text>
+								<text class="magnitude" x={x} y={y + r + 17 + label.length * LABEL_LINE} text-anchor="middle">
+									{skill.level === null ? "L?" : `L${skill.level}`}
+								</text>
+							</g>
+						);
+					})}
+				</svg>
+			</div>
+			{active ? (
+				<StarCard
+					view={view}
+					star={active}
+					left={(cardX / width) * 100}
+					top={(active.y / height) * 100}
+					room={Math.max(CARD_MIN_PX, (flipX ? leftRoom : rightRoom) - 8)}
+					flipX={flipX}
+					flipY={active.y > height * 0.55}
+					onSelect={select}
+					onClose={close}
+				/>
+			) : null}
 		</div>
+	);
+}
+
+/** The information card that opens next to a clicked star. */
+function StarCard({
+	view,
+	star,
+	left,
+	top,
+	room,
+	flipX,
+	flipY,
+	onSelect,
+	onClose,
+}: {
+	readonly view: View;
+	readonly star: Star;
+	readonly left: number;
+	readonly top: number;
+	/** Rendered px between the card's anchor and the frame edge it opens towards. */
+	readonly room: number;
+	readonly flipX: boolean;
+	readonly flipY: boolean;
+	readonly onSelect: (key: string) => void;
+	readonly onClose: () => void;
+}) {
+	const { sv } = star;
+	const { skill } = sv;
+	const openLearning = sv.learningTaskIds.filter((id) => {
+		const t = taskById(view, id);
+		return t !== undefined && isActive(t.task.status);
+	}).length;
+	const neighbours = (keys: readonly string[], none: string) => {
+		const known = keys.flatMap((k) => {
+			const other = view.skills.find((s) => s.skill.key === k);
+			return other === undefined ? [] : [other];
+		});
+		return known.length === 0 ? (
+			<span class="muted">{none}</span>
+		) : (
+			<span class="star-links">
+				{known.map((o) => (
+					<button
+						key={o.skill.key}
+						type="button"
+						class={`star-link state-${o.state}`}
+						onClick={() => onSelect(o.skill.key)}
+					>
+						{o.skill.name}
+					</button>
+				))}
+			</span>
+		);
+	};
+	return (
+		<section
+			id="star-card"
+			class={`star-card${flipX ? " flip-x" : ""}${flipY ? " flip-y" : ""}`}
+			style={{ left: `${left}%`, top: `${top}%`, "--card-room": `${Math.round(room)}px` }}
+			aria-label={`${skill.name} details`}
+		>
+			<header>
+				<span class={`star-card-glyph state-${sv.state}`} aria-hidden="true">
+					✦
+				</span>
+				<h3>{skill.name}</h3>
+				<button type="button" class="star-card-close" aria-label="Close details" onClick={onClose}>
+					×
+				</button>
+			</header>
+			<div class="row">
+				<LevelBadge level={skill.level} />
+				{sv.state === "unassessed" ? null : (
+					<span>{skill.level === null ? "not assessed" : LEVEL_NAMES[skill.level]}</span>
+				)}
+				<SkillStateBadge state={sv.state} />
+			</div>
+			{skill.description ? <p class="star-card-desc">{skill.description}</p> : null}
+			<dl class="facts">
+				{sv.maxRequired === null ? null : (
+					<>
+						<dt>Needed</dt>
+						<dd>
+							<LevelBadge level={sv.maxRequired} /> by {sv.requiredBy.length} open{" "}
+							{sv.requiredBy.length === 1 ? "task" : "tasks"}
+						</dd>
+					</>
+				)}
+				{openLearning === 0 ? null : (
+					<>
+						<dt>Learning</dt>
+						<dd>
+							{openLearning} open {openLearning === 1 ? "step" : "steps"}
+						</dd>
+					</>
+				)}
+				<dt>Builds on</dt>
+				<dd>{neighbours(skill.prerequisites, "no prerequisites")}</dd>
+				<dt>Leads to</dt>
+				<dd>{neighbours(sv.dependents, "nothing yet")}</dd>
+			</dl>
+			<a class="star-card-open" href={`#/skills/${encodeURIComponent(skill.key)}`}>
+				Open skill →
+			</a>
+		</section>
 	);
 }
 
@@ -199,13 +453,14 @@ export function Skills({ view }: { readonly view: View }) {
 					<section class="panel stack">
 						<h2>Constellation</h2>
 						<p class="muted">
-							Arrows run from a prerequisite to the skills that build on it; columns follow the longest prerequisite
-							chain. Click a skill for details.
+							Prerequisites shine on the left; lines lead to the skills that build on them. Brighter stars are higher
+							levels, hollow ones are not assessed yet. Click a star to read it.
 						</p>
 						<Constellation view={view} />
 						<ul class="legend">
 							{STATES.map((s) => (
 								<li key={s}>
+									<span class={`legend-star state-${s}`} aria-hidden="true" />
 									<SkillStateBadge state={s} /> <span class="muted">{STATE_HELP[s]}</span>
 								</li>
 							))}

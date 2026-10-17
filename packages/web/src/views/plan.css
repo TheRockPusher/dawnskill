@@ -148,14 +148,14 @@
 .plan-errors {
 	margin: 0;
 	padding-left: 1.25rem;
-	color: var(--error, #b91c1c);
+	color: var(--danger);
 	font-size: 0.85rem;
 	overflow-wrap: anywhere;
 }
 
 .plan-ok {
 	margin: 0;
-	color: var(--ok, #15803d);
+	color: var(--ok);
 }
 
 /* Editor */

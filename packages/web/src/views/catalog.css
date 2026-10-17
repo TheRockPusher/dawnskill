@@ -151,77 +151,259 @@ table.list th.num {
 
 /* ── Constellation ─────────────────────────────────────────────────────── */
 
-.constellation {
-	overflow-x: auto;
-	padding-bottom: 0.25rem;
+/* Star colors come from the global `.state-*` classes, which set `color`; SVG paints use `currentColor`. */
+
+.sky-frame {
+	position: relative;
 }
 
-.constellation svg {
+.sky {
+	overflow-x: auto;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	background:
+		radial-gradient(ellipse 70% 60% at 18% 0%, rgb(90 120 220 / 0.16), transparent 70%),
+		radial-gradient(ellipse 50% 55% at 88% 100%, rgb(150 110 230 / 0.09), transparent 70%),
+		linear-gradient(180deg, var(--sky-top), var(--sky-bottom));
+}
+
+.sky svg {
 	display: block;
+	width: 100%;
+	height: auto;
 	font-family: inherit;
 }
 
-.constellation .edge {
-	fill: none;
-	stroke: var(--border-strong);
-	stroke-width: 1.5;
-	marker-end: url(#skill-arrow);
+.sky .dust {
+	fill: var(--sky-star);
 }
 
-.constellation marker path {
-	fill: var(--border-strong);
+.sky .dust.t1 {
+	animation: twinkle 4.5s ease-in-out infinite;
 }
 
-.constellation .node rect {
-	fill: var(--panel);
-	stroke: var(--node-color);
-	stroke-width: 2;
+.sky .dust.t2 {
+	animation: twinkle 6.5s ease-in-out 2s infinite;
 }
 
-.constellation .node:hover rect,
-.constellation .node:focus-visible rect {
-	fill: var(--node-tint);
-	stroke-width: 3;
+@keyframes twinkle {
+	50% {
+		opacity: 0.06;
+	}
 }
 
-.constellation .node:focus-visible {
+.sky .edge {
+	stroke: var(--sky-line);
+	stroke-width: 1.2;
+	transition:
+		stroke 0.2s,
+		opacity 0.2s;
+}
+
+.sky .edge.lit {
+	stroke: var(--sky-line-lit);
+	stroke-width: 1.6;
+}
+
+.has-selection .sky .edge:not(.lit) {
+	opacity: 0.3;
+}
+
+.sky .star {
+	cursor: pointer;
 	outline: none;
+	transition: opacity 0.2s;
 }
 
-.constellation .node-name {
+.has-selection .sky .star.dim {
+	opacity: 0.35;
+}
+
+.sky .star .hit {
+	fill: transparent;
+}
+
+.sky .star:focus-visible .hit {
+	stroke: var(--focus);
+	stroke-width: 1.5;
+	stroke-dasharray: 2 3;
+}
+
+.sky .glow-in {
+	stop-color: currentColor;
+	stop-opacity: 0.55;
+}
+
+.sky .glow-out {
+	stop-color: currentColor;
+	stop-opacity: 0;
+}
+
+.sky .star .glow {
+	opacity: 0.7;
+	transition: opacity 0.2s;
+}
+
+.sky .star:hover .glow,
+.sky .star:focus-visible .glow,
+.sky .star.selected .glow {
+	opacity: 1;
+}
+
+.sky .core {
+	fill: color-mix(in srgb, currentColor 40%, white);
+}
+
+.sky .star.unrated .core {
+	fill: var(--sky-bottom);
+	stroke: currentColor;
+	stroke-width: 1.5;
+}
+
+.sky .spikes {
+	stroke: currentColor;
+	stroke-width: 0.8;
+	opacity: 0.55;
+}
+
+.sky .ring {
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.2;
+	stroke-dasharray: 3 3;
+}
+
+.sky .label {
 	fill: var(--fg);
-	font-size: 13px;
-	font-weight: 600;
+	font-size: 12px;
+	font-weight: 500;
+	paint-order: stroke;
+	stroke: var(--sky-bottom);
+	stroke-width: 3px;
+	stroke-linejoin: round;
 }
 
-.constellation .node-level {
-	fill: var(--node-color);
-	font-size: 11.5px;
+.sky .magnitude {
+	fill: currentColor;
+	font-size: 10.5px;
+	letter-spacing: 0.04em;
+	opacity: 0.85;
 }
 
-.constellation .node.state-unassessed {
-	--node-color: var(--state-unassessed);
-	--node-tint: var(--state-unassessed-bg);
+.sky .tether {
+	stroke: var(--sky-line-lit);
+	stroke-width: 1;
+	stroke-dasharray: 2 3;
 }
 
-.constellation .node.state-gap {
-	--node-color: var(--state-gap);
-	--node-tint: var(--state-gap-bg);
+/* Information card that opens beside a clicked star, at the end of the star's tether line. */
+.star-card {
+	--tx: 0px;
+	--ty: -1.6rem;
+	position: absolute;
+	z-index: 2;
+	display: flex;
+	flex-direction: column;
+	gap: 0.55rem;
+	/* `--card-room`: px from the anchor to the frame edge, set per star. */
+	width: min(19rem, var(--card-room, 19rem));
+	padding: 0.8rem 1rem 1rem;
+	background: rgb(17 21 30 / 0.94);
+	backdrop-filter: blur(8px);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-lg);
+	box-shadow:
+		0 18px 40px -16px rgb(0 0 0 / 0.9),
+		0 0 24px -8px rgb(138 180 248 / 0.25);
+	font-size: 0.9rem;
+	transform: translate(var(--tx), var(--ty));
+	animation: star-card-in 0.16s ease-out;
 }
 
-.constellation .node.state-learning {
-	--node-color: var(--state-learning);
-	--node-tint: var(--state-learning-bg);
+.star-card.flip-x {
+	--tx: -100%;
 }
 
-.constellation .node.state-proposed {
-	--node-color: var(--state-proposed);
-	--node-tint: var(--state-proposed-bg);
+.star-card.flip-y {
+	--ty: calc(-100% + 1.6rem);
 }
 
-.constellation .node.state-assessed {
-	--node-color: var(--state-assessed);
-	--node-tint: var(--state-assessed-bg);
+@keyframes star-card-in {
+	from {
+		opacity: 0;
+	}
+}
+
+.star-card header {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.5rem;
+}
+
+.star-card h3 {
+	flex: 1 1 auto;
+	overflow-wrap: anywhere;
+}
+
+.star-card .star-card-glyph {
+	background: none;
+	line-height: 1.3;
+	text-shadow: 0 0 10px currentColor;
+}
+
+.star-card .star-card-close {
+	padding: 0 0.45rem;
+	font-size: 1.1rem;
+	line-height: 1.3;
+	color: var(--muted);
+	background: transparent;
+	border-color: transparent;
+}
+
+.star-card .star-card-close:hover:not(:disabled) {
+	color: var(--fg);
+	background: var(--subtle);
+	border-color: transparent;
+}
+
+.star-card-desc {
+	display: -webkit-box;
+	overflow: hidden;
+	color: var(--muted);
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 3;
+	line-clamp: 3;
+}
+
+.star-card .facts {
+	gap: 0.35rem 0.75rem;
+	font-size: 0.85rem;
+}
+
+.star-links {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.3rem;
+}
+
+.star-links .star-link {
+	padding: 0 0.5rem;
+	border-radius: 999px;
+	font-size: 0.78rem;
+	white-space: normal;
+	text-align: left;
+	background: transparent;
+	border: 1px solid var(--border-strong);
+}
+
+.star-links .star-link:hover:not(:disabled) {
+	background: var(--subtle);
+	border-color: currentColor;
+}
+
+.star-card-open {
+	align-self: flex-start;
+	font-weight: 500;
 }
 
 .legend {
@@ -232,6 +414,39 @@ table.list th.num {
 	padding: 0;
 	list-style: none;
 	font-size: 0.85rem;
+}
+
+.legend li {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+
+.legend .legend-star {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: currentColor;
+	box-shadow: 0 0 6px currentColor;
+}
+
+/* Narrow screens: the sky scrolls sideways instead of shrinking its labels, and the card drops below it.
+   Wider screens never scroll the sky, so the card's percentage position stays on its star. */
+@media (max-width: 720px) {
+	.sky svg {
+		min-width: var(--sky-min-width);
+	}
+
+	.star-card {
+		position: static;
+		width: auto;
+		margin-top: 0.6rem;
+		transform: none;
+	}
+
+	.sky .tether {
+		display: none;
+	}
 }
 
 /* ── Skill detail ──────────────────────────────────────────────────────── */

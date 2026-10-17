@@ -137,7 +137,7 @@ Every constant is specified, with its sources and limits, in [docs/learning-mode
 - **Focus**: what to do now. Next ready work and next learning steps, ranked by effective score, plus "Needs you": pending drafts, level confirmations and due reviews.
 - **Plan**: start a planner run or write a draft by hand, review and edit drafts, rate new skills, preview the learning steps approval will add, then approve or reject.
 - **Tasks**: filterable list and task pages with the priority breakdown, why the task is blocked, dependencies, learning-step details, completion history, and the start, pause, complete, cancel and reopen actions.
-- **Skills**: the skill constellation (prerequisite graph) and skill pages with levels, assessment history, self-rating, level proposals, retrieval prompts and resources.
+- **Skills**: the skill constellation, a star chart of the prerequisite graph (prerequisites to the left, brighter stars for higher levels, color for state; click a star for its level, need, prerequisites and the skills it leads to), and skill pages with levels, assessment history, self-rating, level proposals, retrieval prompts and resources.
 - **Learning**: due reviews (recalled or forgot), level confirmations, the review schedule, skill progress and a journal of everything learned, assessed, reviewed and completed.
 - **Settings**: model connection (base URL, model, API key), ranking of the priority criteria and the resulting weights, estimate statistics per category, and data export.
 
