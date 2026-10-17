@@ -42,19 +42,6 @@ export function SkillStateBadge({ state }: { readonly state: SkillState }) {
 	return <span class={`chip state-${state}`}>{STATE_LABEL[state]}</span>;
 }
 
-const RUN_CHIP: Readonly<Record<PlanRun["status"], string>> = {
-	queued: "state-unassessed",
-	running: "state-learning",
-	done: "state-assessed",
-	failed: "state-gap",
-	cancelled: "state-unassessed",
-};
-
-/** A planner run's status; `running` is the view's word for a run in progress. */
-export function RunStatusChip({ status, running }: { readonly status: PlanRun["status"]; readonly running: string }) {
-	return <span class={`chip ${RUN_CHIP[status]}`}>{status === "running" ? running : status}</span>;
-}
-
 /** Cancels a queued or running planner run; renders nothing once the run has finished. */
 export function CancelRunButton({ run }: { readonly run: PlanRun }) {
 	const [busy, setBusy] = useState(false);
@@ -227,6 +214,35 @@ function useShowThinking(): boolean {
 		return () => void thinkingListeners.delete(setOn);
 	}, []);
 	return on;
+}
+
+/**
+ * A run's chip: the model's part (queued, planning, failed, cancelled) and, once its draft exists, whether the
+ * draft is waiting for you.
+ */
+export function RunStatusChip({ view, run }: { readonly view: View; readonly run: PlanRun }) {
+	const [label, cls] = runChip(view, run);
+	return <span class={`chip ${cls}`}>{label}</span>;
+}
+
+function runChip(view: View, run: PlanRun): readonly [label: string, cls: string] {
+	if (run.status === "queued") return ["queued", "state-unassessed"];
+	if (run.status === "running") return ["model planning…", "state-learning"];
+	if (run.status === "failed") return ["failed", "state-gap"];
+	if (run.status === "cancelled") return ["cancelled", "state-unassessed"];
+	const proposal = run.proposalId === null ? undefined : view.proposals.find((p) => p.id === run.proposalId);
+	switch (proposal?.status) {
+		case "pending":
+			return ["awaiting your review", "state-proposed"];
+		case "accepted":
+			return ["approved", "state-assessed"];
+		case "rejected":
+			return ["rejected", "state-unassessed"];
+		case "superseded":
+			return ["superseded", "state-unassessed"];
+		case undefined:
+			return ["done", "state-assessed"];
+	}
 }
 
 const STAGE_LABEL: Readonly<Record<RunProgress["stage"], string>> = {

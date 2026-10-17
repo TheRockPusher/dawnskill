@@ -427,7 +427,7 @@ function RunStatus({ view, run }: { readonly view: View; readonly run: PlanRun }
 	return (
 		<div class="stack plan-run">
 			<div class="row">
-				<RunStatusChip status={run.status} running="drafting…" />
+				<RunStatusChip view={view} run={run} />
 				<strong>{run.goal}</strong>
 				<span class="muted">
 					{run.startedAt === null ? `queued ${when(run.queuedAt)}` : `started ${when(run.startedAt)}`}

@@ -33,7 +33,7 @@ export function Focus({ view }: { readonly view: View }) {
 	const learning = view.focus.learning.flatMap((id) => taskById(view, id) ?? []);
 	return (
 		<>
-			<GoalIntake />
+			<GoalIntake view={view} />
 			<Summary view={view} />
 			<NeedsYou view={view} />
 			<div class="grid">
@@ -79,7 +79,7 @@ export function Focus({ view }: { readonly view: View }) {
 
 // ---------- Goal intake and planner runs ----------
 
-function GoalIntake() {
+function GoalIntake({ view }: { readonly view: View }) {
 	const { config, runs } = useApp();
 	const [goal, setGoal] = useState("");
 	const [context, setContext] = useState("");
@@ -158,7 +158,7 @@ function GoalIntake() {
 			{shown.length > 0 ? (
 				<ul class="focus-list">
 					{shown.map((run) => (
-						<RunItem key={run.id} run={run} />
+						<RunItem key={run.id} view={view} run={run} />
 					))}
 				</ul>
 			) : null}
@@ -166,12 +166,12 @@ function GoalIntake() {
 	);
 }
 
-function RunItem({ run }: { readonly run: PlanRun }) {
+function RunItem({ view, run }: { readonly view: View; readonly run: PlanRun }) {
 	const attempts = `${run.attempts} attempt${run.attempts === 1 ? "" : "s"}`;
 	return (
 		<li class="focus-item">
 			<div class="row">
-				<RunStatusChip status={run.status} running="planning…" />
+				<RunStatusChip view={view} run={run} />
 				<strong>{run.goal}</strong>
 				<span class="muted small">
 					{run.startedAt === null ? `queued ${when(run.queuedAt)}` : `${attempts} · started ${when(run.startedAt)}`}
