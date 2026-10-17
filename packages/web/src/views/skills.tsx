@@ -9,7 +9,8 @@ import {
 	type SkillView,
 	type View,
 } from "@dawnskill/core";
-import { useMemo, useRef, useState } from "preact/hooks";
+import type { Ref } from "preact";
+import { useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { LEVEL_ANCHORS, LevelBadge, minutes, SkillLink, SkillStateBadge, TaskLink, taskById, when } from "../ui.tsx";
 import { isActive, pick, StatusChip, useSend } from "./tasks.tsx";
 import "./catalog.css";
@@ -47,6 +48,8 @@ const LABEL_LINE = 14;
 /** Star card width (19rem at the 15px root size) and the narrowest it may shrink to beside a star. */
 const CARD_PX = 285;
 const CARD_MIN_PX = 200;
+/** Rendered px the star's tether row keeps from the card's top and bottom edges (the 1.6rem default offset). */
+const CARD_TETHER_PX = 24;
 
 interface Star {
 	readonly sv: SkillView;
@@ -173,6 +176,9 @@ function Constellation({ view }: { readonly view: View }) {
 	const [selected, setSelected] = useState<string | null>(null);
 	const starEls = useRef(new Map<string, SVGGElement>());
 	const frame = useRef<HTMLDivElement>(null);
+	const card = useRef<HTMLElement>(null);
+	/** Measured card top (px) for the selected star; null until measured or on narrow screens (card below the sky). */
+	const [placed, setPlaced] = useState<{ readonly key: string; readonly top: number } | null>(null);
 	const active = selected === null ? undefined : stars.get(selected);
 	const related = new Set(
 		active ? [active.sv.skill.key, ...active.sv.skill.prerequisites, ...active.sv.dependents] : [],
@@ -194,6 +200,23 @@ function Constellation({ view }: { readonly view: View }) {
 		if (selected !== null) starEls.current.get(selected)?.focus();
 		setSelected(null);
 	};
+	const flipY = active !== undefined && active.y > height * 0.55;
+	// The card keeps inside the sky (at most its height, then it scrolls); clamping keeps the tether row in the card.
+	useLayoutEffect(() => {
+		const el = card.current;
+		const box = frame.current;
+		if (active === undefined || el === null || box === null || getComputedStyle(el).position !== "absolute") {
+			if (placed !== null) setPlaced(null);
+			return;
+		}
+		const s = box.clientWidth / width;
+		const h = el.offsetHeight;
+		const anchor = active.y * s;
+		const preferred = flipY ? anchor + CARD_TETHER_PX - h : anchor - CARD_TETHER_PX;
+		const top = Math.round(Math.max(0, Math.min(height * s - h, preferred)));
+		const key = active.sv.skill.key;
+		if (placed?.key !== key || placed.top !== top) setPlaced({ key, top });
+	});
 	const edges = [...stars.values()].flatMap((to) =>
 		to.sv.skill.prerequisites.flatMap((pre) => {
 			const from = stars.get(pre);
@@ -220,6 +243,7 @@ function Constellation({ view }: { readonly view: View }) {
 		<div
 			ref={frame}
 			class={active ? "sky-frame has-selection" : "sky-frame"}
+			style={{ "--sky-h": `${Math.round(height * scale)}px` }}
 			onKeyDown={(e) => {
 				if (e.key === "Escape" && selected !== null) {
 					e.preventDefault();
@@ -318,13 +342,15 @@ function Constellation({ view }: { readonly view: View }) {
 			</div>
 			{active ? (
 				<StarCard
+					cardRef={card}
 					view={view}
 					star={active}
 					left={(cardX / width) * 100}
-					top={(active.y / height) * 100}
+					top={placed?.key === active.sv.skill.key ? `${placed.top}px` : `${(active.y / height) * 100}%`}
+					placed={placed?.key === active.sv.skill.key}
 					room={Math.max(CARD_MIN_PX, (flipX ? leftRoom : rightRoom) - 8)}
 					flipX={flipX}
-					flipY={active.y > height * 0.55}
+					flipY={flipY}
 					onSelect={select}
 					onClose={close}
 				/>
@@ -335,20 +361,26 @@ function Constellation({ view }: { readonly view: View }) {
 
 /** The information card that opens next to a clicked star. */
 function StarCard({
+	cardRef,
 	view,
 	star,
 	left,
 	top,
+	placed,
 	room,
 	flipX,
 	flipY,
 	onSelect,
 	onClose,
 }: {
+	readonly cardRef: Ref<HTMLElement>;
 	readonly view: View;
 	readonly star: Star;
 	readonly left: number;
-	readonly top: number;
+	/** CSS top: the measured px once placed, else the star's height in %. */
+	readonly top: string;
+	/** `top` is the card's own top edge, so no vertical offset applies. */
+	readonly placed: boolean;
 	/** Rendered px between the card's anchor and the frame edge it opens towards. */
 	readonly room: number;
 	readonly flipX: boolean;
@@ -386,9 +418,10 @@ function StarCard({
 	};
 	return (
 		<section
+			ref={cardRef}
 			id="star-card"
-			class={`star-card${flipX ? " flip-x" : ""}${flipY ? " flip-y" : ""}`}
-			style={{ left: `${left}%`, top: `${top}%`, "--card-room": `${Math.round(room)}px` }}
+			class={`star-card${flipX ? " flip-x" : ""}${flipY && !placed ? " flip-y" : ""}${placed ? " placed" : ""}`}
+			style={{ left: `${left}%`, top, "--card-room": `${Math.round(room)}px` }}
 			aria-label={`${skill.name} details`}
 		>
 			<header>

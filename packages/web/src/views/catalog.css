@@ -328,6 +328,18 @@ table.list th.num {
 	--ty: calc(-100% + 1.6rem);
 }
 
+/* Measured placement: `top` is already the card's top edge, kept inside the sky. A card taller than the sky
+   (`--sky-h`, set on the frame) scrolls instead of spilling over the legend. */
+.star-card.placed {
+	--ty: 0px;
+	max-height: var(--sky-h);
+	overflow-y: auto;
+}
+
+.star-card.placed > * {
+	flex-shrink: 0;
+}
+
 @keyframes star-card-in {
 	from {
 		opacity: 0;
