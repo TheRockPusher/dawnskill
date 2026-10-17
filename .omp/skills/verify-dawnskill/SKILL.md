@@ -62,7 +62,7 @@ Everything goes to `EVIDENCE` from `run.env` (`.omp/evidence/verify-dawnskill/RU
 - UI: `proof(feature, step)` writes `<step>.png` (full-page screenshot) and `<step>.aria.yml` (URL + ARIA snapshot of `main`).
 - Second view of every mutation: `sql(query, "<feature>/<name>.jsonl")` (read-only SQLite query: the query plus one JSON row per line) or `api(path, "<feature>/<name>.http")` (request, HTTP status, body). The `kernel_events` table is the source of truth; `tasks`, `skills`, `assessments`, `proposals`, `completions` are its projection.
 - Proof = the user action, the resulting UI state, and the second view agreeing. A toast or a button changing state is never enough on its own.
-- `.omp/evidence/` is not gitignored; leave it out of commits unless the user asks for it.
+- `.omp/evidence/` is gitignored: evidence stays local to the checkout.
 
 ## Cleanup
 
