@@ -48,7 +48,8 @@ export function planResponses(draft: PlanDraft): [tasks: string, skills: string]
 
 /**
  * Replays `script` in order, one entry per call, and records every request. A function entry
- * computes the reply from the request. An extra call throws; `assertDone` throws if replies are left.
+ * computes the reply from the request. `onDelta` hears the whole reply as one chunk. An extra call
+ * throws; `assertDone` throws if replies are left.
  */
 export function scriptedProvider(
 	script: ReadonlyArray<string | ((request: JsonRequest) => string)>,
@@ -57,14 +58,16 @@ export function scriptedProvider(
 	return {
 		model: "scripted",
 		calls,
-		async completeJson(request, signal) {
+		async completeJson(request, signal, onDelta) {
 			signal?.throwIfAborted();
 			calls.push(request);
 			const step = script[calls.length - 1];
 			if (step === undefined) {
 				throw new Error(`scriptedProvider: unexpected call ${calls.length}; the script has ${script.length} replies`);
 			}
-			return typeof step === "string" ? step : step(request);
+			const reply = typeof step === "string" ? step : step(request);
+			onDelta?.({ reasoning: "", content: reply });
+			return reply;
 		},
 		assertDone() {
 			if (calls.length < script.length) {

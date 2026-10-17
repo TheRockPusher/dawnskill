@@ -136,13 +136,14 @@ export function createApi({ store, runs, llm, clock, version }: ApiOptions): Hon
 
 	api.get("/stream", (c) =>
 		streamSSE(c, async (stream) => {
-			const send = (event: "change" | "run", data: unknown): void => {
+			const send = (event: "change" | "run" | "progress", data: unknown): void => {
 				stream.writeSSE({ event, data: JSON.stringify(data) }).catch((error: unknown) => {
 					console.error("SSE write failed", error);
 				});
 			};
 			const unsubscribeStore = store.subscribe((seq) => send("change", { seq }));
 			const unsubscribeRuns = runs.subscribe((run: PlanRun) => send("run", run));
+			const unsubscribeProgress = runs.subscribeProgress((id, progress) => send("progress", { id, progress }));
 			const ping = setInterval(() => {
 				stream.write(": ping\n\n").catch(() => {});
 			}, PING_MS);
@@ -151,6 +152,7 @@ export function createApi({ store, runs, llm, clock, version }: ApiOptions): Hon
 			clearInterval(ping);
 			unsubscribeStore();
 			unsubscribeRuns();
+			unsubscribeProgress();
 		}),
 	);
 

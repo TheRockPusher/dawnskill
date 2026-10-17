@@ -17,6 +17,7 @@ import {
 	LEVEL_ANCHORS,
 	LevelBadge,
 	minutes,
+	RunLive,
 	RunStatusChip,
 	ScoreBreakdown,
 	SkillLink,
@@ -181,6 +182,7 @@ function RunItem({ run }: { readonly run: PlanRun }) {
 				) : null}
 				<CancelRunButton run={run} />
 			</div>
+			<RunLive run={run} />
 			{run.status === "failed" ? (
 				<div class="stack">
 					{run.error ? <p class="error">{run.error}</p> : null}

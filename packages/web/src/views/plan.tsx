@@ -30,6 +30,7 @@ import {
 	CancelRunButton,
 	LEVEL_ANCHORS,
 	LevelBadge,
+	RunLive,
 	RunStatusChip,
 	SkillLink,
 	TaskLink,
@@ -440,6 +441,7 @@ function RunStatus({ view, run }: { readonly view: View; readonly run: PlanRun }
 				) : null}
 				<CancelRunButton run={run} />
 			</div>
+			<RunLive run={run} />
 			{run.error ? <p class="error">{run.error}</p> : null}
 			{run.errors.length > 0 ? (
 				<details>

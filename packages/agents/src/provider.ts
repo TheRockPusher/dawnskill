@@ -1,4 +1,8 @@
-/** OpenAI-compatible chat-completions client (llama.cpp server, vLLM, Ollama, OpenAI, …) returning JSON text. */
+/**
+ * OpenAI-compatible chat-completions client (llama.cpp server, vLLM, Ollama, OpenAI, …) returning JSON text.
+ * Requests a streamed reply so callers can watch thinking and answer arrive; a server that ignores
+ * `stream` and answers with one JSON body works too.
+ */
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 
@@ -13,6 +17,20 @@ const COMPLETION = Type.Object({
 			finish_reason: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 		}),
 		{ minItems: 1 },
+	),
+});
+
+const TEXT = Type.Optional(Type.Union([Type.String(), Type.Null()]));
+/** The part of one streamed chunk we read. OpenRouter reports failures mid-stream as `error`. */
+const STREAM_CHUNK = Type.Object({
+	error: Type.Optional(Type.Object({ message: Type.Optional(Type.String()) })),
+	choices: Type.Optional(
+		Type.Array(
+			Type.Object({
+				delta: Type.Optional(Type.Object({ content: TEXT, reasoning_content: TEXT, reasoning: TEXT, refusal: TEXT })),
+				finish_reason: TEXT,
+			}),
+		),
 	),
 });
 
@@ -39,11 +57,17 @@ export interface JsonRequest {
 	readonly maxTokens: number;
 }
 
+/** One streamed chunk of a reply. `reasoning`: the model's thinking (`delta.reasoning_content` from llama.cpp/DeepSeek/vLLM, or `delta.reasoning` from OpenRouter/Ollama); `content`: answer text. Either may be "". */
+export interface ReplyDelta {
+	readonly reasoning: string;
+	readonly content: string;
+}
+
 /** One provider is one conversation: every request it sends carries the same session ID. */
 export interface ChatProvider {
 	readonly model: string;
-	/** Raw JSON text of the assistant reply; parsing and validation are the caller's job. */
-	completeJson(request: JsonRequest, signal?: AbortSignal): Promise<string>;
+	/** Raw JSON text of the assistant reply. `onDelta` hears each streamed chunk as it arrives (≈ one token). */
+	completeJson(request: JsonRequest, signal?: AbortSignal, onDelta?: (delta: ReplyDelta) => void): Promise<string>;
 }
 
 export interface ProviderOptions {
@@ -125,7 +149,7 @@ export function openAiCompatibleProvider(config: LlmConfig, options: ProviderOpt
 
 	return {
 		model: config.model,
-		async completeJson(request, signal) {
+		async completeJson(request, signal, onDelta) {
 			const timeout = AbortSignal.timeout(config.timeoutMs);
 			const maxTokens = Math.min(request.maxTokens, config.maxTokens);
 			const body = JSON.stringify({
@@ -136,22 +160,22 @@ export function openAiCompatibleProvider(config: LlmConfig, options: ProviderOpt
 				],
 				temperature: 0.2,
 				max_tokens: maxTokens,
+				stream: true,
 				response_format: {
 					type: "json_schema",
 					json_schema: { name: request.schemaName, strict: true, schema: request.schema },
 				},
 			});
+			const aborted = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
 			try {
-				const response = await fetchImpl(url, {
-					method: "POST",
-					headers,
-					body,
-					signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
-				});
+				const response = await fetchImpl(url, { method: "POST", headers, body, signal: aborted });
 				if (!response.ok) {
 					const text = redact(await response.text()).slice(0, ERROR_BODY_CHARS);
 					if (CONTEXT_ERROR.test(text)) throw new ContextSizeError(`HTTP ${response.status}: ${text}`);
 					throw new Error(`LLM request failed: HTTP ${response.status}: ${text}`);
+				}
+				if (response.headers.get("content-type")?.includes("text/event-stream") === true) {
+					return await streamedContent(response, aborted, maxTokens, redact, onDelta);
 				}
 				return messageContent(await response.json(), maxTokens);
 			} catch (error) {
@@ -173,5 +197,78 @@ function messageContent(payload: unknown, maxTokens: number): string {
 	if (typeof message?.refusal === "string") {
 		throw new Error(`LLM refused: ${message.refusal.slice(0, ERROR_BODY_CHARS)}`);
 	}
+	throw new Error("LLM response has no choices[0].message.content");
+}
+
+/**
+ * Reads a server-sent-events reply: one `data: <chunk JSON>` line per chunk, `data: [DONE]` last.
+ * Chunks of unknown shape are skipped. `signal` also cancels reading the body.
+ */
+async function streamedContent(
+	response: Response,
+	signal: AbortSignal,
+	maxTokens: number,
+	redact: (text: string) => string,
+	onDelta: ((delta: ReplyDelta) => void) | undefined,
+): Promise<string> {
+	let content = "";
+	let sawContent = false;
+	let refusal = "";
+	/** Handles one line; true once the stream says it is done. */
+	const line = (raw: string): boolean => {
+		const text = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+		if (!text.startsWith("data:")) return false; // blank, `:` comment, `event:`, `id:`, `retry:`
+		const data = text.slice(text.startsWith("data: ") ? 6 : 5);
+		if (data.trim() === "[DONE]") return true;
+		let chunk: unknown;
+		try {
+			chunk = JSON.parse(data);
+		} catch {
+			return false;
+		}
+		if (!Value.Check(STREAM_CHUNK, chunk)) return false;
+		if (chunk.error !== undefined) {
+			const detail = redact(JSON.stringify(chunk.error));
+			const message = redact(chunk.error.message ?? detail).slice(0, ERROR_BODY_CHARS);
+			if (CONTEXT_ERROR.test(detail)) throw new ContextSizeError(`stream error: ${message}`);
+			throw new Error(`LLM stream error: ${message}`);
+		}
+		const choice = chunk.choices?.[0];
+		if (choice === undefined) return false;
+		const delta = choice.delta;
+		if (typeof delta?.content === "string") sawContent = true;
+		const piece = delta?.content ?? "";
+		const thought = delta?.reasoning_content || delta?.reasoning || "";
+		content += piece;
+		refusal += delta?.refusal ?? "";
+		if (piece !== "" || thought !== "") onDelta?.({ reasoning: thought, content: piece });
+		if (choice.finish_reason === "length") throw new TruncatedReplyError(maxTokens);
+		return false;
+	};
+
+	signal.throwIfAborted();
+	const reader = response.body?.getReader();
+	if (reader !== undefined) {
+		const cancel = () => void reader.cancel(signal.reason).catch(() => {});
+		signal.addEventListener("abort", cancel, { once: true });
+		const decoder = new TextDecoder();
+		let buffer = "";
+		try {
+			for (let done = false; !done; ) {
+				const read = await reader.read();
+				signal.throwIfAborted();
+				buffer += read.done ? decoder.decode() : decoder.decode(read.value, { stream: true });
+				const lines = buffer.split("\n");
+				buffer = read.done ? "" : (lines.pop() ?? "");
+				done = read.done || lines.some(line);
+			}
+		} finally {
+			signal.removeEventListener("abort", cancel);
+			void reader.cancel().catch(() => {});
+		}
+	}
+	if (content !== "") return content;
+	if (refusal !== "") throw new Error(`LLM refused: ${refusal.slice(0, ERROR_BODY_CHARS)}`);
+	if (sawContent) return content;
 	throw new Error("LLM response has no choices[0].message.content");
 }

@@ -8,8 +8,8 @@ import {
 	type View,
 } from "@dawnskill/core";
 import type { ComponentChildren } from "preact";
-import { useState } from "preact/hooks";
-import { type EventResult, type PlanRun, cancelPlan, sendEvent } from "./api.ts";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
+import { type EventResult, type PlanRun, type RunProgress, cancelPlan, sendEvent } from "./api.ts";
 import type { EventBody } from "@dawnskill/core";
 
 /** Behavioural self-assessment anchors per level (docs/learning-model.md §1). */
@@ -191,5 +191,109 @@ export function ActionButton({
 			</button>
 			{error ? <span class="error">{error}</span> : null}
 		</span>
+	);
+}
+
+const THINKING_KEY = "dawnskill.showThinking";
+
+function readShowThinking(): boolean {
+	try {
+		return localStorage.getItem(THINKING_KEY) === "1";
+	} catch {
+		return false;
+	}
+}
+
+/** "Show model thinking", shared by every mounted RunLive and persisted across reloads. */
+let showThinking = readShowThinking();
+const thinkingListeners = new Set<(on: boolean) => void>();
+
+function setShowThinking(on: boolean): void {
+	showThinking = on;
+	try {
+		if (on) localStorage.setItem(THINKING_KEY, "1");
+		else localStorage.removeItem(THINKING_KEY);
+	} catch {
+		// Storage unavailable (private mode, quota): the choice lasts until reload.
+	}
+	for (const listener of thinkingListeners) listener(on);
+}
+
+function useShowThinking(): boolean {
+	const [on, setOn] = useState(showThinking);
+	useEffect(() => {
+		thinkingListeners.add(setOn);
+		setOn(showThinking);
+		return () => void thinkingListeners.delete(setOn);
+	}, []);
+	return on;
+}
+
+const STAGE_LABEL: Readonly<Record<RunProgress["stage"], string>> = {
+	tasks: "drafting tasks",
+	skills: "drafting skills",
+	dedupe: "checking duplicate skills",
+};
+
+/** Live planner progress: stage, tokens and rate while running, optionally the model's thinking. */
+export function RunLive({ run }: { readonly run: PlanRun }) {
+	const thinking = useShowThinking();
+	const progress = run.progress;
+	const running = run.status === "running";
+	if (progress === null) return running ? <p class="muted small run-live">waiting for the model…</p> : null;
+	const rate = `${progress.tokensPerSecond === null ? "—" : progress.tokensPerSecond.toFixed(1)} tok/s`;
+	if (!running) {
+		return (
+			<p class="muted small run-live">
+				{progress.totalTokens} token{progress.totalTokens === 1 ? "" : "s"} · {rate}
+			</p>
+		);
+	}
+	const stats = [STAGE_LABEL[progress.stage]];
+	if (progress.requests > 1) stats.push(`request ${progress.requests}`);
+	stats.push(`${progress.tokens} token${progress.tokens === 1 ? "" : "s"}`, rate);
+	return (
+		<div class="run-live">
+			<div class="row run-live-stats">
+				<span class="muted small">{stats.join(" · ")}</span>
+				<label class="small">
+					<input type="checkbox" checked={thinking} onChange={(e) => setShowThinking(e.currentTarget.checked)} />
+					Show model thinking
+				</label>
+			</div>
+			{thinking ? (
+				progress.reasoning !== "" ? (
+					<ThinkingBox text={progress.reasoning} />
+				) : progress.output !== "" ? (
+					<>
+						<span class="muted small">answer so far</span>
+						<ThinkingBox text={progress.output} />
+					</>
+				) : (
+					<p class="muted small">no thinking streamed yet</p>
+				)
+			) : null}
+		</div>
+	);
+}
+
+/** Scrollable tail of streamed text; follows new text unless the user has scrolled up. */
+function ThinkingBox({ text }: { readonly text: string }) {
+	const box = useRef<HTMLPreElement>(null);
+	const pinned = useRef(true);
+	useLayoutEffect(() => {
+		if (box.current && pinned.current) box.current.scrollTop = box.current.scrollHeight;
+	}, [text]);
+	return (
+		<pre
+			ref={box}
+			class="run-thinking"
+			onScroll={(e) => {
+				const el = e.currentTarget;
+				pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 16;
+			}}
+		>
+			{text}
+		</pre>
 	);
 }

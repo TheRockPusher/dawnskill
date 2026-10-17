@@ -1,6 +1,23 @@
 import type { EventBody, IllegalCode, View } from "@dawnskill/core";
 import { useEffect, useState } from "preact/hooks";
 
+/** Mirrors the host's live planner progress (SSE `progress`, and the latest copy on each run). */
+export interface RunProgress {
+	readonly stage: "tasks" | "skills" | "dedupe";
+	/** Model requests started in this run (stages, repairs and dedupe checks). */
+	readonly requests: number;
+	/** Tail of the current request's thinking. */
+	readonly reasoning: string;
+	/** Tail of the current request's answer text. */
+	readonly output: string;
+	/** Chunks streamed in the current request (≈ tokens). */
+	readonly tokens: number;
+	/** Chunks streamed over the whole run. */
+	readonly totalTokens: number;
+	/** Streaming rate of the current request; null below 2 chunks. */
+	readonly tokensPerSecond: number | null;
+}
+
 /** Mirrors the host's planner run record (GET /api/plan/runs, SSE `run`). */
 export interface PlanRun {
 	readonly id: string;
@@ -14,6 +31,8 @@ export interface PlanRun {
 	/** Null while the run waits behind earlier runs. */
 	readonly startedAt: string | null;
 	readonly finishedAt: string | null;
+	/** Null until the first model request; kept on the finished run. */
+	readonly progress: RunProgress | null;
 }
 
 /** Mirrors the host's `GET /api/config` → `llm`; the API key never leaves the host. */
@@ -84,6 +103,18 @@ function start(): void {
 	const stream = new EventSource("/api/stream");
 	stream.addEventListener("change", () => void loadView());
 	stream.addEventListener("run", () => void Promise.all([loadRuns(), loadView()]));
+	// Progress patches its run in place; refetching on every chunk would flood the host.
+	stream.addEventListener("progress", (event) => {
+		let data: { readonly id?: unknown; readonly progress?: RunProgress };
+		try {
+			data = JSON.parse(event.data as string) as typeof data;
+		} catch {
+			return;
+		}
+		const { id, progress } = data;
+		if (!progress || !snapshot.runs.some((r) => r.id === id)) return;
+		publish({ runs: snapshot.runs.map((r) => (r.id === id ? { ...r, progress } : r)) });
+	});
 	// Age and review due dates advance with time even without events.
 	setInterval(() => void loadView(), 60_000);
 }

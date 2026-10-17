@@ -1,13 +1,13 @@
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ChatProvider, LlmConfig } from "@dawnskill/agents";
+import type { ChatProvider, LlmConfig, ReplyDelta } from "@dawnskill/agents";
 import { planResponses, scriptedProvider } from "@dawnskill/agents/testing";
 import { AGENT_EVENTS, type EventType, type PlanDraft, type View } from "@dawnskill/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { type Store, openStore } from "./db/store.ts";
 import { createLlm } from "./llm.ts";
-import { MAX_PENDING, type PlanRun } from "./runs.ts";
+import { MAX_PENDING, type PlanRun, type RunProgress, createPlanRuns } from "./runs.ts";
 import { type App, createApp } from "./server.ts";
 
 const NOW = "2026-10-16T09:00:00.000Z";
@@ -144,6 +144,43 @@ function setup(
 	/** The config the next plan run would connect with. */
 	const nextConfig = (): LlmConfig | undefined => (llm.provider() === null ? undefined : connected.at(-1));
 	return { store, provider, app, request, json, plan, view, connected, nextConfig };
+}
+
+/** Reads `GET /api/stream`; `until` resolves once the text received so far contains `text`. */
+async function openStream(app: App) {
+	const response = await app.app.request("/api/stream");
+	expect(response.headers.get("Content-Type")).toBe("text/event-stream");
+	const reader = response.body?.getReader();
+	if (reader === undefined) throw new Error("no stream body");
+	const decoder = new TextDecoder();
+	let buffer = "";
+	return {
+		received: () => buffer,
+		async until(text: string): Promise<void> {
+			while (!buffer.includes(text)) {
+				const { value, done } = await reader.read();
+				if (done) throw new Error(`stream ended before ${text}`);
+				buffer += decoder.decode(value, { stream: true });
+			}
+		},
+		cancel: () => reader.cancel(),
+	};
+}
+
+/** Replays `replies`, first streaming the chunks `chunks(call)` yields for that call (0-based) to `onDelta`. */
+function streamingProvider(
+	replies: readonly string[],
+	chunks: (call: number, onDelta: (delta: ReplyDelta) => void) => void,
+): ChatProvider {
+	let call = 0;
+	return {
+		model: "streaming",
+		completeJson: async (_request, _signal, onDelta) => {
+			const index = call++;
+			if (onDelta !== undefined) chunks(index, onDelta);
+			return replies[index] ?? "";
+		},
+	};
 }
 
 describe("goal intake", () => {
@@ -573,25 +610,106 @@ describe("other routes", () => {
 
 	it("streams store changes and run updates", async () => {
 		const { app, json } = setup(planResponses(draft("Plan A")));
-		const response = await app.app.request("/api/stream");
-		expect(response.headers.get("Content-Type")).toBe("text/event-stream");
-		const reader = response.body?.getReader();
-		if (reader === undefined) throw new Error("no stream body");
-		const decoder = new TextDecoder();
-		let buffer = "";
-		const until = async (text: string): Promise<void> => {
-			while (!buffer.includes(text)) {
-				const { value, done } = await reader.read();
-				if (done) throw new Error(`stream ended before ${text}`);
-				buffer += decoder.decode(value, { stream: true });
-			}
-		};
-		await until('event: change\ndata: {"seq":0}\n\n');
+		const stream = await openStream(app);
+		await stream.until('event: change\ndata: {"seq":0}\n\n');
 		expect((await json("POST", "/api/plan", { goal: "Plan A" })).status).toBe(202);
 		await app.runs.idle();
-		await until('event: change\ndata: {"seq":1}\n\n');
-		await until('"status":"done"');
-		expect(buffer).toContain('event: run\ndata: {"id":"R1","goal":"Plan A","status":"running"');
-		await reader.cancel();
+		await stream.until('event: change\ndata: {"seq":1}\n\n');
+		await stream.until('"status":"done"');
+		expect(stream.received()).toContain('event: run\ndata: {"id":"R1","goal":"Plan A","status":"running"');
+		await stream.cancel();
+	});
+});
+
+describe("plan progress", () => {
+	/** Runs without the HTTP layer so the monotonic clock can be driven by the test. */
+	function directRuns(now: () => number) {
+		const store = openStore(":memory:");
+		stores.push(store);
+		const runs = createPlanRuns(store, () => NOW, now);
+		const published: Array<{ id: string; progress: RunProgress }> = [];
+		runs.subscribeProgress((id, progress) => published.push({ id, progress }));
+		const statuses: string[] = [];
+		runs.subscribe((run) => statuses.push(run.status));
+		const plan = async (provider: ChatProvider): Promise<PlanRun> => {
+			const started = runs.start({ goal: "Plan A", context: "", supersedes: null }, provider);
+			if (started === null) throw new Error("busy");
+			await runs.idle();
+			const run = runs.list().find((r) => r.id === started.id);
+			if (run === undefined) throw new Error(`run ${started.id} not listed`);
+			return run;
+		};
+		return { published, statuses, plan };
+	}
+
+	it("streams the model's thinking as progress events, never as run events", async () => {
+		const provider = streamingProvider(planResponses(draft("Plan A")), (call, onDelta) => {
+			if (call === 0) onDelta({ reasoning: "Ownership comes before the CLI.", content: "" });
+		});
+		const { app, json } = setup(provider);
+		const stream = await openStream(app);
+		await stream.until('event: change\ndata: {"seq":0}\n\n');
+		expect((await json("POST", "/api/plan", { goal: "Plan A" })).status).toBe(202);
+		await app.runs.idle();
+		await stream.until('"status":"done"');
+		expect(stream.received()).toContain(
+			'event: progress\ndata: {"id":"R1","progress":{"stage":"tasks","requests":1,"reasoning":"Ownership comes before the CLI."',
+		);
+		// queued, running, done: progress never adds a run event.
+		expect(stream.received().match(/event: run\n/g)).toHaveLength(3);
+		const listed = await json<PlanRun[]>("GET", "/api/plan/runs");
+		expect(listed.body[0]?.progress).toMatchObject({ stage: "skills", requests: 2, totalTokens: 1 });
+		await stream.cancel();
+	});
+
+	it("throttles progress to every 250 ms and rates tokens between the first and last chunk", async () => {
+		let clock = 1000;
+		const { published, statuses, plan } = directRuns(() => clock);
+		const provider = streamingProvider(planResponses(draft("Plan A")), (call, onDelta) => {
+			// Tasks stage: 10 chunks within 180 ms. Skills stage: 5 chunks 100 ms apart, after a 2 s pause.
+			const [count, gap] = call === 0 ? [10, 20] : [5, 100];
+			clock += call === 0 ? 0 : 2000;
+			for (let i = 0; i < count; i++) {
+				if (i > 0) clock += gap;
+				onDelta({ reasoning: "", content: "x" });
+			}
+		});
+		const run = await plan(provider);
+		expect(run.status).toBe("done");
+		expect(statuses).toEqual(["queued", "running", "done"]);
+		expect(published.map(({ progress }) => [progress.stage, progress.tokens])).toEqual([
+			["tasks", 0],
+			["tasks", 1],
+			["skills", 0],
+			["skills", 1],
+			["skills", 4],
+		]);
+		expect(published.every(({ id }) => id === run.id)).toBe(true);
+		// The finished run includes the chunk the throttle held back.
+		expect(run.progress).toEqual({
+			stage: "skills",
+			requests: 2,
+			reasoning: "",
+			output: "xxxxx",
+			tokens: 5,
+			totalTokens: 15,
+			tokensPerSecond: 10,
+		});
+	});
+
+	it("keeps only the tail of long thinking and answers", async () => {
+		let clock = 0;
+		const { plan } = directRuns(() => clock);
+		const provider = streamingProvider(planResponses(draft("Plan A")), (_call, onDelta) => {
+			for (const letter of "abcde") {
+				clock += 10;
+				onDelta({ reasoning: letter.repeat(1000), content: letter.repeat(600) });
+			}
+		});
+		const run = await plan(provider);
+		expect(run.progress?.reasoning).toBe(
+			`${"b".repeat(1000)}${"c".repeat(1000)}${"d".repeat(1000)}${"e".repeat(1000)}`,
+		);
+		expect(run.progress?.output).toBe(`${"b".repeat(200)}${"c".repeat(600)}${"d".repeat(600)}${"e".repeat(600)}`);
 	});
 });

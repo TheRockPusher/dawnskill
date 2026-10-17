@@ -1,5 +1,5 @@
 // LLM agents (planner first): they propose changes and never write domain state.
-export { type PlanResult, PlannerError, planGoal } from "./planner.ts";
+export { type PlanResult, PlannerError, type PlannerStage, type PlannerStreamEvent, planGoal } from "./planner.ts";
 export type { PlannerInput } from "./prompt.ts";
 export {
 	type ChatProvider,
@@ -10,4 +10,5 @@ export {
 	llmConfigFromEnv,
 	llmLimitsFromEnv,
 	openAiCompatibleProvider,
+	type ReplyDelta,
 } from "./provider.ts";

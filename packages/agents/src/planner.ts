@@ -63,11 +63,21 @@ interface TasksStage {
 	readonly tasks: readonly DraftTask[];
 }
 
+export type PlannerStage = "tasks" | "skills" | "dedupe";
+export type PlannerStreamEvent =
+	| { readonly type: "request"; readonly stage: PlannerStage } // before every model request, repairs included
+	| { readonly type: "delta"; readonly reasoning: string; readonly content: string };
+
 export async function planGoal(
 	provider: ChatProvider,
 	state: KernelState,
 	input: PlannerInput,
-	options: { readonly maxRepairs?: number; readonly signal?: AbortSignal } = {},
+	options: {
+		readonly maxRepairs?: number;
+		readonly signal?: AbortSignal;
+		/** Hears each model request as it starts and each chunk its reply streams. */
+		readonly onStream?: (event: PlannerStreamEvent) => void;
+	} = {},
 ): Promise<PlanResult> {
 	const maxRepairs = options.maxRepairs ?? DEFAULT_MAX_REPAIRS;
 	if (!Number.isInteger(maxRepairs) || maxRepairs < 0) {
@@ -77,6 +87,26 @@ export async function planGoal(
 	const goal = input.goal.trim().slice(0, MAX_GOAL);
 	if (goal === "") throw new RangeError("goal is empty; legal: non-empty text");
 	let attempts = 0;
+	const onStream = options.onStream;
+	// Every request (stages, repairs, judge calls) goes through this, so `onStream` hears them all.
+	const model: ChatProvider =
+		onStream === undefined
+			? provider
+			: {
+					model: provider.model,
+					completeJson(request, signal) {
+						const stage: PlannerStage =
+							request.schemaName === "plan_tasks"
+								? "tasks"
+								: request.schemaName === "plan_skills"
+									? "skills"
+									: "dedupe";
+						onStream({ type: "request", stage });
+						return provider.completeJson(request, signal, (delta) =>
+							onStream({ type: "delta", reasoning: delta.reasoning, content: delta.content }),
+						);
+					},
+				};
 	/** One stage: generate, check, repair. `items` names what to cap after a truncated reply. */
 	const generate = async <T>(
 		prompt: PlannerPrompt,
@@ -91,7 +121,7 @@ export async function planGoal(
 			const request = { system: prompt.system, user, schemaName, schema, maxTokens: STAGE_MAX_TOKENS };
 			let raw: string;
 			try {
-				raw = await provider.completeJson(request, options.signal);
+				raw = await model.completeJson(request, options.signal);
 			} catch (error) {
 				if (error instanceof ContextSizeError) throw new PlannerError([error.message], attempts, error.message);
 				if (!(error instanceof TruncatedReplyError)) throw error;
@@ -124,7 +154,7 @@ export async function planGoal(
 	// Final gate: both stages passed, so this only fails if assembly itself is wrong.
 	const errors = validateDraft(state, draft);
 	if (errors.length > 0) throw new PlannerError(errors, attempts);
-	const deduped = await dedupeSkills(provider, state, draft, options.signal);
+	const deduped = await dedupeSkills(model, state, draft, options.signal);
 	return { draft: deduped.draft, attempts, remapped: deduped.remapped };
 }
 

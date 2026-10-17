@@ -637,6 +637,38 @@ progress {
 	vertical-align: middle;
 }
 
+/* ---------- Planner run progress ---------- */
+
+.run-live {
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+	min-width: 0;
+}
+
+p.run-live {
+	margin: 0;
+}
+
+.run-live p {
+	margin: 0;
+}
+
+.run-live-stats {
+	justify-content: space-between;
+	font-variant-numeric: tabular-nums;
+}
+
+.run-thinking {
+	max-height: 16rem;
+	overflow-y: auto;
+	overflow-wrap: anywhere;
+	font-size: 0.8rem;
+	line-height: 1.45;
+	color: var(--muted);
+	border: 1px solid var(--border);
+}
+
 /* ---------- Focus view ---------- */
 
 .focus-list {

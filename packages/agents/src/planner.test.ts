@@ -1,8 +1,14 @@
 import { fc, test } from "@fast-check/vitest";
 import { initialState, type KernelState, type PlanDraft, type Skill } from "@dawnskill/core";
 import { describe, expect, it } from "vitest";
-import { PlannerError, planGoal } from "./planner.ts";
-import { ContextSizeError, llmConfigFromEnv, openAiCompatibleProvider, TruncatedReplyError } from "./provider.ts";
+import { PlannerError, type PlannerStreamEvent, planGoal } from "./planner.ts";
+import {
+	ContextSizeError,
+	llmConfigFromEnv,
+	openAiCompatibleProvider,
+	type ReplyDelta,
+	TruncatedReplyError,
+} from "./provider.ts";
 import { planResponses, scriptedProvider } from "./testing.ts";
 
 const AT = "2026-10-16T09:30:00.000Z";
@@ -473,6 +479,25 @@ describe("skill deduplication", () => {
 		expect(provider.calls).toHaveLength(10);
 		expect(result.draft).toEqual(VALID);
 	});
+
+	it("streams a request event per model call with its stage, each followed by its reply", async () => {
+		const [tasks, skills] = planResponses(draft);
+		const rewritten = JSON.stringify({ ...JSON.parse(tasks), goal: "Add --repurpose to the CLI parser" });
+		const provider = scriptedProvider([rewritten, tasks, skills, '{"same": true}']);
+		const events: PlannerStreamEvent[] = [];
+		await planGoal(provider, stateWith([existing]), INPUT, { onStream: (event) => events.push(event) });
+		provider.assertDone();
+		expect(events).toEqual([
+			{ type: "request", stage: "tasks" },
+			{ type: "delta", reasoning: "", content: rewritten },
+			{ type: "request", stage: "tasks" },
+			{ type: "delta", reasoning: "", content: tasks },
+			{ type: "request", stage: "skills" },
+			{ type: "delta", reasoning: "", content: skills },
+			{ type: "request", stage: "dedupe" },
+			{ type: "delta", reasoning: "", content: '{"same": true}' },
+		]);
+	});
 });
 
 describe("openAiCompatibleProvider", () => {
@@ -518,6 +543,7 @@ describe("openAiCompatibleProvider", () => {
 			],
 			temperature: 0.2,
 			max_tokens: 99,
+			stream: true,
 			response_format: {
 				type: "json_schema",
 				json_schema: { name: "plan_draft", strict: true, schema: { type: "object" } },
@@ -604,6 +630,110 @@ describe("openAiCompatibleProvider", () => {
 			.catch((e: unknown) => e)) as Error;
 		expect(error).toBeInstanceOf(TruncatedReplyError);
 		expect(error.message).toBe("reply truncated at max_tokens 99");
+	});
+
+	/** Server-sent events from `chunks` (`[DONE]` passed through as is), one byte per read so lines, JSON and characters arrive cut apart. */
+	function sse(chunks: readonly unknown[]): Response {
+		const text = chunks
+			.map((chunk) => (chunk === "[DONE]" ? "data: [DONE]\n\n" : `data: ${JSON.stringify(chunk)}\r\n\r\n`))
+			.join("");
+		const bytes = new TextEncoder().encode(`: keep-alive\n\nevent: message\n${text}`);
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (let at = 0; at < bytes.length; at++) controller.enqueue(bytes.slice(at, at + 1));
+				controller.close();
+			},
+		});
+		return new Response(body, { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8" } });
+	}
+
+	const delta = (fields: Record<string, unknown>, finishReason: string | null = null) => ({
+		choices: [{ index: 0, delta: fields, finish_reason: finishReason }],
+	});
+
+	it("assembles a streamed reply and reports thinking and answer chunks in order", async () => {
+		const { fetch } = capture(() =>
+			sse([
+				delta({ role: "assistant", content: "" }),
+				delta({ content: null, reasoning_content: "Zwei Aufgaben — " }),
+				delta({ reasoning: "passt." }),
+				delta({ content: '{"ok":' }),
+				delta({ content: "true}" }, "stop"),
+				"[DONE]",
+				delta({ content: "after done" }),
+			]),
+		);
+		const deltas: ReplyDelta[] = [];
+		const content = await openAiCompatibleProvider(config, { userAgent, fetch }).completeJson(request, undefined, (d) =>
+			deltas.push(d),
+		);
+		expect(content).toBe('{"ok":true}');
+		expect(deltas).toEqual([
+			{ reasoning: "Zwei Aufgaben — ", content: "" },
+			{ reasoning: "passt.", content: "" },
+			{ reasoning: "", content: '{"ok":' },
+			{ reasoning: "", content: "true}" },
+		]);
+	});
+
+	it("reports a streamed reply cut off at max_tokens as TruncatedReplyError", async () => {
+		const { fetch } = capture(() => sse([delta({ content: '{"summary": "tr' }), delta({}, "length"), "[DONE]"]));
+		const error = (await openAiCompatibleProvider(config, { userAgent, fetch })
+			.completeJson(request)
+			.catch((e: unknown) => e)) as Error;
+		expect(error).toBeInstanceOf(TruncatedReplyError);
+		expect(error.message).toBe("reply truncated at max_tokens 99");
+	});
+
+	it("rejects on an error sent mid-stream, without the API key", async () => {
+		const { fetch } = capture(() =>
+			sse([delta({ content: "{" }), { error: { code: 502, message: "upstream failed for sk-secret-123" } }]),
+		);
+		const error = (await openAiCompatibleProvider(config, { userAgent, fetch })
+			.completeJson(request)
+			.catch((e: unknown) => e)) as Error;
+		expect(error).not.toBeInstanceOf(ContextSizeError);
+		expect(error.message).toBe("LLM stream error: upstream failed for [redacted]");
+	});
+
+	it("reports a context-size error sent mid-stream as ContextSizeError", async () => {
+		const { fetch } = capture(() =>
+			sse([{ error: { code: 400, message: "This endpoint's maximum context length is 8192 tokens" } }]),
+		);
+		const error = (await openAiCompatibleProvider(config, { userAgent, fetch })
+			.completeJson(request)
+			.catch((e: unknown) => e)) as Error;
+		expect(error).toBeInstanceOf(ContextSizeError);
+		expect(error.message).toContain("maximum context length is 8192 tokens");
+	});
+
+	it("times out while a stream stalls", async () => {
+		const stalled = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(delta({ content: "{" }))}\n\n`));
+			},
+		});
+		const { fetch } = capture(
+			() => new Response(stalled, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		);
+		const provider = openAiCompatibleProvider({ ...config, timeoutMs: 20 }, { userAgent, fetch });
+		await expect(provider.completeJson(request)).rejects.toThrow("LLM request timed out after 20 ms");
+	});
+
+	it("reads a plain JSON reply when the server ignores stream", async () => {
+		const { fetch } = capture(
+			() =>
+				new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: "stop" }] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+		);
+		const deltas: ReplyDelta[] = [];
+		const content = await openAiCompatibleProvider(config, { userAgent, fetch }).completeJson(request, undefined, (d) =>
+			deltas.push(d),
+		);
+		expect(content).toBe('{"ok":true}');
+		expect(deltas).toEqual([]);
 	});
 });
 

@@ -1,10 +1,33 @@
 // Background planner runs: model output only ever becomes a pending PlanProposed (agents propose, K6).
 // Runs are queued and execute one at a time, oldest first, so a single local model is never asked twice at once.
 import type { ProposalId } from "@dawnskill/core";
-import { type ChatProvider, PlannerError, planGoal } from "@dawnskill/agents";
+import {
+	type ChatProvider,
+	PlannerError,
+	type PlannerStage,
+	type PlannerStreamEvent,
+	planGoal,
+} from "@dawnskill/agents";
 import type { Store } from "./db/store.ts";
 
 type RunStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+
+/** Live view of the planner's model calls; `tokens` counts streamed chunks (≈ tokens). */
+export interface RunProgress {
+	readonly stage: PlannerStage;
+	/** Model requests started in this run (stages, repairs and dedupe checks). */
+	readonly requests: number;
+	/** Tail of the current request's thinking, at most 4000 chars. */
+	readonly reasoning: string;
+	/** Tail of the current request's answer text, at most 2000 chars. */
+	readonly output: string;
+	/** Chunks streamed in the current request (≈ tokens). */
+	readonly tokens: number;
+	/** Chunks streamed over the whole run. */
+	readonly totalTokens: number;
+	/** (tokens − 1) / seconds between the current request's first and last chunk; null below 2 chunks or zero elapsed time. */
+	readonly tokensPerSecond: number | null;
+}
 
 export interface PlanRun {
 	readonly id: string;
@@ -20,6 +43,8 @@ export interface PlanRun {
 	/** Null while the run waits behind earlier runs. */
 	readonly startedAt: string | null;
 	readonly finishedAt: string | null;
+	/** Null until the first model request; the finished run keeps its last state. */
+	readonly progress: RunProgress | null;
 }
 
 interface PlanInput {
@@ -47,6 +72,8 @@ export interface PlanRuns {
 	cancel(id: string): CancelResult;
 	/** Cancels every queued and running run (shutdown). */
 	cancelAll(): void;
+	/** Called on every new model request and at most every 250 ms while chunks stream; never on status changes. */
+	subscribeProgress(listener: (id: string, progress: RunProgress) => void): () => void;
 }
 
 type CancelResult =
@@ -62,8 +89,17 @@ interface Job {
 	readonly input: PlanInput;
 	readonly provider: ChatProvider;
 }
+/** Minimum gap between progress publications of one run while chunks stream. */
+const PROGRESS_MS = 250;
+const REASONING_TAIL = 4000;
+const OUTPUT_TAIL = 2000;
 
-export function createPlanRuns(store: Store, clock: () => string): PlanRuns {
+/** `now`: monotonic milliseconds for the token rate and the progress throttle. */
+export function createPlanRuns(
+	store: Store,
+	clock: () => string,
+	now: () => number = () => performance.now(),
+): PlanRuns {
 	let runs: readonly PlanRun[] = [];
 	let counter = 0;
 	const queue: Job[] = [];
@@ -72,18 +108,77 @@ export function createPlanRuns(store: Store, clock: () => string): PlanRuns {
 	/** The loop draining `queue`; null when nothing is queued or running. */
 	let worker: Promise<void> | null = null;
 	const listeners = new Set<(run: PlanRun) => void>();
+	const progressListeners = new Set<(id: string, progress: RunProgress) => void>();
+
+	function notify<A extends unknown[]>(targets: ReadonlySet<(...args: A) => void>, ...args: A): void {
+		for (const listener of targets) {
+			try {
+				listener(...args);
+			} catch (error) {
+				console.error("plan run listener failed", error);
+			}
+		}
+	}
 
 	function publish(run: PlanRun): void {
 		runs = runs.some((r) => r.id === run.id)
 			? runs.map((r) => (r.id === run.id ? run : r))
 			: [run, ...runs].slice(0, KEEP);
-		for (const listener of listeners) {
-			try {
-				listener(run);
-			} catch (error) {
-				console.error("plan run listener failed", error);
-			}
-		}
+		notify(listeners, run);
+	}
+
+	function publishProgress(id: string, progress: RunProgress): void {
+		runs = runs.map((r) => (r.id === id ? { ...r, progress } : r));
+		notify(progressListeners, id, progress);
+	}
+
+	/** Folds the planner's stream events into the run's progress; events after `settle()` or a cancel are ignored. */
+	function track(id: string, signal: AbortSignal) {
+		let progress: RunProgress | null = null;
+		let first = 0;
+		let lastPublished = Number.NEGATIVE_INFINITY;
+		let settled = false;
+		const send = (at: number): void => {
+			if (progress === null) return;
+			lastPublished = at;
+			publishProgress(id, progress);
+		};
+		return {
+			progress: () => progress,
+			settle: () => {
+				settled = true;
+			},
+			onStream: (event: PlannerStreamEvent): void => {
+				if (settled || signal.aborted) return;
+				if (event.type === "request") {
+					progress = {
+						stage: event.stage,
+						requests: (progress?.requests ?? 0) + 1,
+						reasoning: "",
+						output: "",
+						tokens: 0,
+						totalTokens: progress?.totalTokens ?? 0,
+						tokensPerSecond: null,
+					};
+					send(now());
+					return;
+				}
+				if (progress === null) return;
+				const at = now();
+				if (progress.tokens === 0) first = at;
+				const tokens = progress.tokens + 1;
+				progress = {
+					...progress,
+					reasoning: (progress.reasoning + event.reasoning).slice(-REASONING_TAIL),
+					output: (progress.output + event.content).slice(-OUTPUT_TAIL),
+					tokens,
+					totalTokens: progress.totalTokens + 1,
+					tokensPerSecond: tokens < 2 || at === first ? null : ((tokens - 1) * 1000) / (at - first),
+				};
+				// The first chunk of a request shows at once; later ones at most every PROGRESS_MS.
+				if (tokens === 1 || at - lastPublished >= PROGRESS_MS) send(at);
+			},
+		};
 	}
 
 	async function execute(
@@ -92,9 +187,15 @@ export function createPlanRuns(store: Store, clock: () => string): PlanRuns {
 		provider: ChatProvider,
 		signal: AbortSignal,
 	): Promise<PlanRun> {
+		const tracker = track(run.id, signal);
 		let finished: PlanRun;
 		try {
-			const result = await planGoal(provider, store.state, { goal: input.goal, context: input.context }, { signal });
+			const result = await planGoal(
+				provider,
+				store.state,
+				{ goal: input.goal, context: input.context },
+				{ signal, onStream: tracker.onStream },
+			);
 			// A provider may finish despite the abort; a cancelled run must never propose.
 			signal.throwIfAborted();
 			const before = store.state.proposals;
@@ -130,7 +231,8 @@ export function createPlanRuns(store: Store, clock: () => string): PlanRuns {
 				finishedAt: clock(),
 			};
 		}
-		return finished;
+		tracker.settle();
+		return { ...finished, progress: tracker.progress() };
 	}
 
 	/** Runs queued jobs one by one until the queue is empty; `start` calls during a run append to it. */
@@ -149,7 +251,9 @@ export function createPlanRuns(store: Store, clock: () => string): PlanRuns {
 	}
 
 	function cancelled(run: PlanRun): PlanRun {
-		const final: PlanRun = { ...run, status: "cancelled", finishedAt: clock() };
+		// The listed record carries the latest progress; `run` is the snapshot taken when it was queued or started.
+		const latest = runs.find((r) => r.id === run.id) ?? run;
+		const final: PlanRun = { ...latest, status: "cancelled", finishedAt: clock() };
 		publish(final);
 		return final;
 	}
@@ -169,6 +273,7 @@ export function createPlanRuns(store: Store, clock: () => string): PlanRuns {
 				queuedAt: clock(),
 				startedAt: null,
 				finishedAt: null,
+				progress: null,
 			};
 			queue.push({ run, input, provider });
 			publish(run);
@@ -181,6 +286,12 @@ export function createPlanRuns(store: Store, clock: () => string): PlanRuns {
 			listeners.add(listener);
 			return () => {
 				listeners.delete(listener);
+			};
+		},
+		subscribeProgress(listener) {
+			progressListeners.add(listener);
+			return () => {
+				progressListeners.delete(listener);
 			};
 		},
 		cancel(id) {
