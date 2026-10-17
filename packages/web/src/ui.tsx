@@ -259,6 +259,8 @@ export function RunLive({ run }: { readonly run: PlanRun }) {
 	if (progress === null) return running ? <p class="muted small run-live">waiting for the model…</p> : null;
 	const rate = `${progress.tokensPerSecond === null ? "—" : progress.tokensPerSecond.toFixed(1)} tok/s`;
 	if (!running) {
+		// A run that ended before any chunk (unreachable model, cancelled while waiting) has nothing to report.
+		if (progress.totalTokens === 0) return null;
 		return (
 			<p class="muted small run-live">
 				{progress.totalTokens} token{progress.totalTokens === 1 ? "" : "s"} · {rate}
