@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0](https://github.com/TheRockPusher/dawnskill/compare/v0.3.0...v0.4.0) (2026-10-17)
+
+
+### Features
+
+* **host:** queue plan runs and let them be cancelled ([8764650](https://github.com/TheRockPusher/dawnskill/commit/87646504eb57a8b6822b89cd872af75085e8ca12))
+* **web:** dark night-sky theme and a star-chart skill constellation ([dbe4fbb](https://github.com/TheRockPusher/dawnskill/commit/dbe4fbb7f763a459f6f84ae75978d59c4e65842a))
+* **web:** show live model thinking and tokens per second for planner runs ([e122769](https://github.com/TheRockPusher/dawnskill/commit/e122769501564e192f459705fccfec04751e049d))
+* **web:** tell model planning apart from drafts awaiting review in run chips ([eca41c4](https://github.com/TheRockPusher/dawnskill/commit/eca41c43f6dc8802a76adcd1b3483b7db1ba768c))
+
+
+### Bug Fixes
+
+* **web:** hide the token line on runs that ended before any chunk ([7ae66c6](https://github.com/TheRockPusher/dawnskill/commit/7ae66c66c7182432f0b96eab95be664e269fb88f))
+* **web:** keep the star card inside the constellation ([daf4d84](https://github.com/TheRockPusher/dawnskill/commit/daf4d840488893706ad49ebbbba57079ca528fe8))
+
 ## [0.3.0](https://github.com/TheRockPusher/dawnskill/compare/v0.2.0...v0.3.0) (2026-10-16)
 
 
