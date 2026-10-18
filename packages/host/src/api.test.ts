@@ -1,14 +1,15 @@
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatProvider, LlmConfig, ReplyDelta } from "@dawnskill/agents";
-import { planResponses, scriptedProvider } from "@dawnskill/agents/testing";
+import { extractResponse, planResponses, scriptedProvider } from "@dawnskill/agents/testing";
 import { AGENT_EVENTS, type EventType, type PlanDraft, type View } from "@dawnskill/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { type Store, openStore } from "./db/store.ts";
 import { createLlm } from "./llm.ts";
-import { MAX_PENDING, type PlanRun, type RunProgress, createPlanRuns } from "./runs.ts";
+import { MAX_PENDING, type PlanRun, type RunProgress, type SourceLoader, createPlanRuns } from "./runs.ts";
 import { type App, createApp } from "./server.ts";
+import { fetchSources } from "./sources.ts";
 
 const NOW = "2026-10-16T09:00:00.000Z";
 
@@ -88,12 +89,19 @@ const ENV: LlmConfig = { baseUrl: "http://127.0.0.1:8080/v1", apiKey: null, mode
 
 /**
  * `model`: scripted replies, a hand-written provider, or null for no provider. Every configured model
- * (environment or saved settings) connects to it. `dir` holds the saved model settings.
+ * (environment or saved settings) connects to it. `dir` holds the saved model settings. `loadSources`
+ * reads plan source pages; by default any page read fails, so no test reaches the network.
  */
 function setup(
 	model: ReadonlyArray<string> | ChatProvider | null,
 	clock: () => string = () => NOW,
-	{ env = model !== null, dir = tempDir() }: { readonly env?: boolean; readonly dir?: string } = {},
+	{
+		env = model !== null,
+		dir = tempDir(),
+		loadSources = async (urls) => {
+			throw new Error(`setup: no pages for ${urls.join(", ")}`);
+		},
+	}: { readonly env?: boolean; readonly dir?: string; readonly loadSources?: SourceLoader } = {},
 ) {
 	const store = openStore(":memory:");
 	stores.push(store);
@@ -118,6 +126,7 @@ function setup(
 		clock,
 		webDir: "/nonexistent",
 		version: "1.2.3",
+		loadSources,
 	});
 	const request = (method: string, path: string, body?: unknown): Promise<Response> =>
 		Promise.resolve(
@@ -488,6 +497,186 @@ describe("planner failure", () => {
 	});
 });
 
+describe("source pages", () => {
+	const SITE = "https://www.susanrigetti.com";
+	const PHYSICS_HTML =
+		"<html><head><title>Physics</title></head><body><h1>Physics</h1>" +
+		"<ul><li>Classical Mechanics by John Taylor</li></ul></body></html>";
+
+	/** The real `fetchSources` over a fake network: `pages` maps a URL to its HTML; any other URL answers 404. */
+	function pageLoader(pages: Readonly<Record<string, string>>): SourceLoader {
+		const fetch = async (input: string | URL | Request): Promise<Response> => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			const html = Object.hasOwn(pages, url) ? pages[url] : undefined;
+			return html === undefined
+				? new Response("missing", { status: 404 })
+				: new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+		};
+		return (urls, signal) => fetchSources(urls, { signal, fetch });
+	}
+
+	/** Records every page read and holds it until `release()`; it ignores aborts, so a cancelled read still finishes. */
+	function gatedLoader() {
+		let release = (): void => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const read: string[] = [];
+		const load: SourceLoader = async (urls) => {
+			read.push(...urls);
+			await gate;
+			return urls.map((url) => ({ url, title: "Physics", text: "- Classical Mechanics by John Taylor" }));
+		};
+		return { load, release, read };
+	}
+
+	it("reads a page linked in the context and gives its text to the planner", async () => {
+		const replies = [
+			extractResponse([{ title: "Classical Mechanics", creator: "John Taylor" }]),
+			...planResponses(draft("Learn physics")),
+		];
+		const { provider, plan } = setup(replies, undefined, {
+			loadSources: pageLoader({ [`${SITE}/physics`]: PHYSICS_HTML }),
+		});
+		const run = await plan({ goal: "Learn physics", context: `Work through ${SITE}/physics.` });
+		expect(run).toMatchObject({ status: "done", sources: [`${SITE}/physics`], error: null });
+		expect(provider?.calls[0]?.user).toContain("Classical Mechanics by John Taylor");
+		provider?.assertDone();
+	});
+
+	it("reads listed pages first, then new links from the goal and context, and refuses more than 10", async () => {
+		const gated = gatedLoader();
+		const { app, json } = setup([], undefined, { loadSources: gated.load });
+		const listed = Array.from({ length: 8 }, (_, i) => `${SITE}/page-${i}`);
+		// Ten distinct pages: the context repeats a listed one.
+		const accepted = await json("POST", "/api/plan", {
+			goal: "Learn math and philosophy",
+			context: `Also ${SITE}/math, ${SITE}/page-3 and ${SITE}/philosophy.`,
+			sources: listed,
+		});
+		expect(accepted.status).toBe(202);
+		const over = await json<{ error: string; details: string[] }>("POST", "/api/plan", {
+			goal: `Learn physics from ${SITE}/physics`,
+			context: `Then ${SITE}/math and ${SITE}/philosophy.`,
+			sources: listed,
+		});
+		expect(over.status).toBe(400);
+		expect(over.body.error).toContain("/sources");
+		const runs = await json<PlanRun[]>("GET", "/api/plan/runs");
+		expect(runs.body.map((run) => run.sources)).toEqual([[...listed, `${SITE}/math`, `${SITE}/philosophy`]]);
+		app.runs.cancelAll();
+		gated.release();
+		await app.runs.idle();
+	});
+
+	it("fails the run, naming the page, when a page cannot be read, and never asks the model", async () => {
+		const { store, provider, plan } = setup([], undefined, {
+			loadSources: pageLoader({ [`${SITE}/physics`]: PHYSICS_HTML }),
+		});
+		const run = await plan({ goal: "Learn math and physics", sources: [`${SITE}/physics`, `${SITE}/math`] });
+		expect(run).toMatchObject({ status: "failed", attempts: 0, errors: [], proposalId: null, finishedAt: NOW });
+		expect(run.error).toContain(`could not read ${SITE}/math`);
+		expect(provider?.calls).toEqual([]);
+		expect(store.events()).toEqual([]);
+	});
+
+	it("cancelling a run while it reads a page never asks the model, and the next run starts", async () => {
+		const gated = gatedLoader();
+		const { app, json, provider, store } = setup(planResponses(draft("Plan B")), undefined, {
+			loadSources: gated.load,
+		});
+		const a = await json<{ runId: string }>("POST", "/api/plan", { goal: "Plan A", context: `See ${SITE}/physics` });
+		await json("POST", "/api/plan", { goal: "Plan B" });
+		const cancel = await json<PlanRun>("POST", `/api/plan/runs/${a.body.runId}/cancel`);
+		expect(cancel.body).toMatchObject({
+			status: "cancelled",
+			progress: { stage: "fetch", requests: 0, output: `${SITE}/physics`, totalTokens: 0 },
+		});
+		gated.release();
+		await app.runs.idle();
+		expect(gated.read).toEqual([`${SITE}/physics`]);
+		expect(app.runs.list().map((run) => [run.goal, run.status])).toEqual([
+			["Plan B", "done"],
+			["Plan A", "cancelled"],
+		]);
+		const goals = Object.values(store.state.proposals).map((p) => p.payload.kind === "plan" && p.payload.draft.goal);
+		expect(goals).toEqual(["Plan B"]);
+		provider?.assertDone();
+	});
+});
+
+describe("whole-curriculum plans", () => {
+	it("plans past the usual task cap when uncapped", async () => {
+		const books: PlanDraft = {
+			...draft("Read the whole list"),
+			tasks: Array.from({ length: 15 }, (_, i) => ({
+				ref: `t${i + 1}`,
+				title: `Read book ${i + 1} and solve its exercises`,
+				notes: "",
+				doneWhen: `every exercise of book ${i + 1} attempted`,
+				category: "reading",
+				estimateMinutes: 120,
+				importance: 3,
+				urgency: 2,
+				requires: i === 0 ? [{ skill: "rust-ownership", level: 2 }] : [],
+				after: [],
+			})),
+		};
+		// Uncapped skills requests cover 8 tasks each: the only skill link (task 0) is in the first batch.
+		const [tasksReply, skillsReply] = planResponses(books);
+		const { store, provider, plan } = setup([tasksReply, skillsReply, JSON.stringify({ skills: [] })]);
+		const run = await plan({ goal: "Read the whole list", uncapped: true });
+		expect(run).toMatchObject({ status: "done", uncapped: true });
+		const proposal = run.proposalId === null ? undefined : store.state.proposals[run.proposalId];
+		const tasks = proposal?.payload.kind === "plan" ? proposal.payload.draft.tasks : [];
+		expect(tasks).toHaveLength(15);
+		provider?.assertDone();
+	});
+
+	it("accepts 150 study tasks that develop skills, and approval keeps develops without inserting learning", async () => {
+		const { json, view } = setup(null);
+		const books = Array.from({ length: 150 }, (_, i) => i + 1);
+		const curriculum: PlanDraft = {
+			goal: "Learn physics",
+			summary: "Work through the curriculum in order.",
+			skills: books.map((n) => ({
+				key: `physics-${n}`,
+				name: `Physics topic ${n}`,
+				description: "",
+				concepts: [`idea ${n}a`, `idea ${n}b`],
+				prerequisites: [],
+				resources: [],
+				retrievalPrompts: [`Explain topic ${n}.`, `Apply topic ${n}.`],
+				practiceMinutes: 60,
+			})),
+			tasks: books.map((n) => ({
+				ref: `t${n}`,
+				title: `Read Book ${n} and solve its exercises`,
+				notes: "",
+				doneWhen: `every exercise of Book ${n} attempted`,
+				category: "reading",
+				estimateMinutes: 600,
+				importance: 3,
+				urgency: 2,
+				requires: [],
+				develops: [{ skill: `physics-${n}`, level: 2 }],
+				after: n === 1 ? [] : [`t${n - 1}`],
+			})),
+		};
+		const proposed = await json("POST", "/api/events", { type: "PlanProposed", draft: curriculum, supersedes: null });
+		expect(proposed.status).toBe(200);
+		const ratings = Object.fromEntries(books.map((n) => [`physics-${n}`, 0]));
+		expect((await json("POST", "/api/events", { type: "PlanApproved", proposalId: "P1", ratings })).status).toBe(200);
+		const { tasks } = await view();
+		expect(tasks).toHaveLength(150);
+		const first = tasks.find((t) => t.task.title === "Read Book 1 and solve its exercises");
+		expect(first).toMatchObject({
+			ready: true,
+			task: { learning: null, develops: [{ skill: "physics-1", level: 2 }] },
+		});
+	});
+});
+
 describe("view caching", () => {
 	it("answers 304 for a matching ETag and changes it on the next event", async () => {
 		const { app, json } = setup(null);
@@ -525,7 +714,7 @@ describe("without a model", () => {
 		expect(response.body.error).toContain("DAWNSKILL_LLM_BASE_URL");
 		expect((await json("GET", "/api/config")).body).toEqual({
 			version: "1.2.3",
-			llm: { configured: false, source: null, model: null, baseUrl: null, hasApiKey: false },
+			llm: { configured: false, source: null, model: null, baseUrl: null, hasApiKey: false, ...LIMITS },
 		});
 		expect((await json("GET", "/api/plan/runs")).body).toEqual([]);
 	});
@@ -533,14 +722,19 @@ describe("without a model", () => {
 
 describe("model settings", () => {
 	const SETTINGS = { baseUrl: "https://api.example.com/v1", model: "gpt-x", apiKey: "sk-secret" };
-	const APP_STATUS = { configured: true, source: "app", model: "gpt-x", baseUrl: SETTINGS.baseUrl, hasApiKey: true };
+	const APP_STATUS = {
+		configured: true,
+		source: "app",
+		model: "gpt-x",
+		baseUrl: SETTINGS.baseUrl,
+		hasApiKey: true,
+		...LIMITS,
+	};
+	const ENV_STATUS = { configured: true, source: "env", model: "scripted", baseUrl: null, hasApiKey: false, ...LIMITS };
 
 	it("reports an environment model without its URL", async () => {
 		const { json } = setup([]);
-		expect((await json("GET", "/api/config")).body).toEqual({
-			version: "1.2.3",
-			llm: { configured: true, source: "env", model: "scripted", baseUrl: null, hasApiKey: false },
-		});
+		expect((await json("GET", "/api/config")).body).toEqual({ version: "1.2.3", llm: ENV_STATUS });
 	});
 
 	it("enables planning without environment variables and never returns the key", async () => {
@@ -559,9 +753,7 @@ describe("model settings", () => {
 		const restarted = setup([], undefined, { dir });
 		expect((await restarted.json("GET", "/api/config")).body).toMatchObject({ llm: APP_STATUS });
 		expect(restarted.nextConfig()).toEqual({ ...SETTINGS, ...LIMITS });
-		expect((await restarted.json("DELETE", "/api/settings/llm")).body).toEqual({
-			llm: { configured: true, source: "env", model: "scripted", baseUrl: null, hasApiKey: false },
-		});
+		expect((await restarted.json("DELETE", "/api/settings/llm")).body).toEqual({ llm: ENV_STATUS });
 		expect((await setup([], undefined, { dir }).json("GET", "/api/config")).body).toMatchObject({
 			llm: { source: "env" },
 		});
@@ -588,6 +780,51 @@ describe("model settings", () => {
 			expect(response.body.error).toContain("invalid model settings");
 		}
 		expect((await json("GET", "/api/config")).body).toMatchObject({ llm: { configured: false } });
+	});
+
+	it("saved reply budget and timeout override the environment's and drive the next run", async () => {
+		const dir = tempDir();
+		const { json, plan, connected } = setup(planResponses(draft("Plan A")), undefined, { dir });
+		const limits = { maxTokens: 32_768, timeoutMs: 300_000 };
+		const saved = await json("PUT", "/api/settings/llm", { ...SETTINGS, ...limits });
+		expect(saved).toEqual({ status: 200, body: { llm: { ...APP_STATUS, ...limits } } });
+		expect((await json("GET", "/api/config")).body).toMatchObject({ llm: limits });
+		expect((await plan({ goal: "Plan A" })).status).toBe("done");
+		expect(connected).toEqual([{ ...SETTINGS, ...limits }]);
+		expect(setup([], undefined, { dir }).nextConfig()).toEqual({ ...SETTINGS, ...limits });
+		// Saving without them hands the limits back to the environment.
+		const plain = await json("PUT", "/api/settings/llm", { baseUrl: SETTINGS.baseUrl, model: "gpt-x" });
+		expect(plain.body).toEqual({ llm: APP_STATUS });
+	});
+
+	it("rejects a reply budget or timeout out of range and keeps the current settings", async () => {
+		const { json } = setup([], undefined, { env: false });
+		const illegal = [
+			{ maxTokens: 255 },
+			{ maxTokens: 262_145 },
+			{ maxTokens: 4096.5 },
+			{ timeoutMs: 999 },
+			{ timeoutMs: 3_600_001 },
+			{ timeoutMs: "300000" },
+		];
+		for (const limit of illegal) {
+			const response = await json<{ error: string; details: string[] }>("PUT", "/api/settings/llm", {
+				...SETTINGS,
+				...limit,
+			});
+			expect(response.status).toBe(400);
+			expect(response.body.error).toContain("invalid model settings");
+			expect(response.body.details.join("\n")).toContain(`/${Object.keys(limit)[0]}`);
+		}
+		expect((await json("GET", "/api/config")).body).toMatchObject({ llm: { configured: false } });
+	});
+
+	it("loads a settings file saved before reply budget and timeout existed with the environment's", async () => {
+		const dir = tempDir();
+		writeFileSync(join(dir, "llm-settings.json"), JSON.stringify({ ...SETTINGS }), { mode: 0o600 });
+		const { json, nextConfig } = setup([], undefined, { dir });
+		expect((await json("GET", "/api/config")).body).toMatchObject({ llm: APP_STATUS });
+		expect(nextConfig()).toEqual({ ...SETTINGS, ...LIMITS });
 	});
 });
 
@@ -626,13 +863,16 @@ describe("plan progress", () => {
 	function directRuns(now: () => number) {
 		const store = openStore(":memory:");
 		stores.push(store);
-		const runs = createPlanRuns(store, () => NOW, now);
+		const runs = createPlanRuns(store, () => NOW, { now });
 		const published: Array<{ id: string; progress: RunProgress }> = [];
 		runs.subscribeProgress((id, progress) => published.push({ id, progress }));
 		const statuses: string[] = [];
 		runs.subscribe((run) => statuses.push(run.status));
 		const plan = async (provider: ChatProvider): Promise<PlanRun> => {
-			const started = runs.start({ goal: "Plan A", context: "", supersedes: null }, provider);
+			const started = runs.start(
+				{ goal: "Plan A", context: "", sources: [], uncapped: false, supersedes: null },
+				provider,
+			);
 			if (started === null) throw new Error("busy");
 			await runs.idle();
 			const run = runs.list().find((r) => r.id === started.id);

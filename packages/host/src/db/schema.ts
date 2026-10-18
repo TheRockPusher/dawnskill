@@ -132,6 +132,14 @@ CREATE TABLE allowed_transitions (
 	PRIMARY KEY (entity, from_status, to_status)
 ) STRICT, WITHOUT ROWID;
 `,
+	`
+CREATE TABLE task_develops (
+	task_id TEXT NOT NULL REFERENCES tasks (id),
+	skill TEXT NOT NULL REFERENCES skills (key),
+	level INTEGER NOT NULL CHECK (level BETWEEN 1 AND 5),
+	PRIMARY KEY (task_id, skill)
+) STRICT, WITHOUT ROWID;
+`,
 ];
 
 /** Opens (creating if needed) and migrates a database; `":memory:"` gives a private in-memory one. */

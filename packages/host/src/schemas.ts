@@ -10,6 +10,10 @@ const SHORT = 200;
 const TEXT = 4000;
 const URL_MAX = 2048;
 const LIST = 100;
+/** Item cap of a plan's skills, tasks and approval ratings: an uncapped plan covers a whole curriculum. */
+const PLAN_LIST = 1000;
+/** Pages one plan run may read, counting links found in the goal and context. */
+export const MAX_SOURCES = 10;
 
 const options = { additionalProperties: false } as const;
 const id = Type.String({ minLength: 1, maxLength: ID });
@@ -21,6 +25,7 @@ const level = Type.Unsafe<Level>(Type.Integer({ minimum: 0, maximum: 5 }));
 const targetLevel = Type.Unsafe<TargetLevel>(Type.Integer({ minimum: 1, maximum: 5 }));
 const criterion = Type.Unsafe<Criterion>(Type.Union(CRITERIA.map((c) => Type.Literal(c))));
 const list = <T extends TSchema>(item: T) => Type.Array(item, { maxItems: LIST });
+const planList = <T extends TSchema>(item: T) => Type.Array(item, { maxItems: PLAN_LIST });
 const nullable = <T extends TSchema>(schema: T) => Type.Union([schema, Type.Null()]);
 
 const resource = Type.Object({ title: short, url: Type.String({ maxLength: URL_MAX }) }, options);
@@ -38,7 +43,7 @@ const taskFields = {
 	requirements: list(requirement),
 };
 
-const newTask = Type.Object(taskFields, options);
+const newTask = Type.Object({ ...taskFields, develops: Type.Optional(list(requirement)) }, options);
 const taskPatch = Type.Object(
 	{
 		goalId: Type.Optional(taskFields.goalId),
@@ -50,6 +55,7 @@ const taskPatch = Type.Object(
 		importance: Type.Optional(taskFields.importance),
 		urgency: Type.Optional(taskFields.urgency),
 		requirements: Type.Optional(taskFields.requirements),
+		develops: Type.Optional(list(requirement)),
 	},
 	options,
 );
@@ -77,11 +83,15 @@ const draftTask = Type.Object(
 		importance: likert,
 		urgency: likert,
 		requires: list(requirement),
+		develops: Type.Optional(list(requirement)),
 		after: list(short),
 	},
 	options,
 );
-const planDraft = Type.Object({ goal: short, summary: text, skills: list(newSkill), tasks: list(draftTask) }, options);
+const planDraft = Type.Object(
+	{ goal: short, summary: text, skills: planList(newSkill), tasks: planList(draftTask) },
+	options,
+);
 
 const event = <K extends string, P extends Record<string, TSchema>>(type: K, properties: P) =>
 	Type.Object({ type: Type.Literal(type), ...properties }, options);
@@ -109,7 +119,7 @@ const variants = [
 	event("PlanProposed", { draft: planDraft, supersedes: nullable(id) }),
 	event("LevelProposed", { skill: id, level: targetLevel, evidence: text }),
 	event("ProposalRejected", { proposalId: id, reason: text }),
-	event("PlanApproved", { proposalId: id, ratings: Type.Record(Type.String(), level, { maxProperties: LIST }) }),
+	event("PlanApproved", { proposalId: id, ratings: Type.Record(Type.String(), level, { maxProperties: PLAN_LIST }) }),
 	event("LevelConfirmed", { proposalId: id, evidence: text }),
 	event("ReviewRecorded", { skill: id, recalled: Type.Boolean() }),
 	event("PreferencesSet", { criteriaRank: Type.Array(criterion, { maxItems: 5 }) }),
@@ -123,17 +133,32 @@ const PlanRequestSchema = Type.Object(
 		goal: Type.String({ minLength: 1, maxLength: 500, pattern: "\\S" }),
 		context: Type.Optional(Type.String({ maxLength: 4000 })),
 		supersedes: Type.Optional(id),
+		/** Pages to read before planning; links in `goal` and `context` are added after these. */
+		sources: Type.Optional(
+			Type.Array(Type.String({ maxLength: URL_MAX, pattern: "^https?://\\S+$" }), { maxItems: MAX_SOURCES }),
+		),
+		/** Plan a provided curriculum in full: no task or minute cap. */
+		uncapped: Type.Optional(Type.Boolean()),
 	},
 	options,
 );
 type PlanRequest = Static<typeof PlanRequestSchema>;
 
-/** Body of `PUT /api/settings/llm`. `apiKey` omitted keeps the saved key; null or blank removes it. */
+/** Reply budget (`max_tokens` cap) and request timeout saved with the model settings; also checked when the saved file is read. */
+export const replyTokens = Type.Integer({ minimum: 256, maximum: 262_144 });
+export const requestTimeoutMs = Type.Integer({ minimum: 1000, maximum: 3_600_000 });
+
+/**
+ * Body of `PUT /api/settings/llm`. `apiKey` omitted keeps the saved key; null or blank removes it.
+ * `maxTokens`/`timeoutMs` omitted: DAWNSKILL_LLM_MAX_TOKENS/DAWNSKILL_LLM_TIMEOUT_MS or their defaults apply.
+ */
 const LlmUpdateSchema = Type.Object(
 	{
 		baseUrl: Type.String({ minLength: 1, maxLength: URL_MAX }),
 		model: Type.Optional(short),
 		apiKey: Type.Optional(nullable(Type.String({ maxLength: TEXT }))),
+		maxTokens: Type.Optional(replyTokens),
+		timeoutMs: Type.Optional(requestTimeoutMs),
 	},
 	options,
 );

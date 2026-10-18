@@ -1,19 +1,26 @@
-// The planner's model connection. Settings saved from the web UI win over the DAWNSKILL_LLM_* environment.
-// They live in their own file, not the event log, so the API key never reaches an export; the file is
-// written with mode 0600 and holds the key in plain text.
+// The planner's model connection. Settings saved from the web UI win over the DAWNSKILL_LLM_* environment,
+// including the reply budget and timeout when saved with them. They live in their own file, not the event
+// log, so the API key never reaches an export; the file is written with mode 0600 and holds the key in plain text.
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { type ChatProvider, DEFAULT_MODEL, type LlmConfig, type LlmLimits } from "@dawnskill/agents";
 import Type from "typebox";
 import { Compile } from "typebox/compile";
-import type { LlmUpdate } from "./schemas.ts";
+import { type LlmUpdate, replyTokens, requestTimeoutMs } from "./schemas.ts";
 
 const SavedSchema = Type.Object(
-	{ baseUrl: Type.String({ minLength: 1 }), apiKey: Type.Union([Type.String(), Type.Null()]), model: Type.String() },
+	{
+		baseUrl: Type.String({ minLength: 1 }),
+		apiKey: Type.Union([Type.String(), Type.Null()]),
+		model: Type.String(),
+		// Absent in files saved before they existed: the environment's limits apply.
+		maxTokens: Type.Optional(replyTokens),
+		timeoutMs: Type.Optional(requestTimeoutMs),
+	},
 	{ additionalProperties: false },
 );
 const savedSettings = Compile(SavedSchema);
 
-interface Saved {
+interface Saved extends Partial<LlmLimits> {
 	readonly baseUrl: string;
 	readonly apiKey: string | null;
 	readonly model: string;
@@ -28,6 +35,9 @@ interface LlmStatus {
 	/** Only for settings saved in the app; the environment's URL is not echoed. */
 	readonly baseUrl: string | null;
 	readonly hasApiKey: boolean;
+	/** Effective `max_tokens` cap and request timeout of the configured model, else of the environment. */
+	readonly maxTokens: number;
+	readonly timeoutMs: number;
 }
 
 export interface Llm {
@@ -44,7 +54,7 @@ interface LlmOptions {
 	/** JSON file holding the settings saved in the app. */
 	readonly file: string;
 	readonly env: LlmConfig | null;
-	/** Request limits for a model configured in the app. */
+	/** Request limits from the environment; settings saved with their own limits override them. */
 	readonly limits: LlmLimits;
 	readonly connect: (config: LlmConfig) => ChatProvider;
 }
@@ -66,6 +76,8 @@ export function createLlm({ file, env, limits, connect }: LlmOptions): Llm {
 				model: current?.model ?? null,
 				baseUrl: saved?.baseUrl ?? null,
 				hasApiKey: current !== null && current.apiKey !== null,
+				maxTokens: (current ?? limits).maxTokens,
+				timeoutMs: (current ?? limits).timeoutMs,
 			};
 		},
 		save(update) {
@@ -81,7 +93,13 @@ export function createLlm({ file, env, limits, connect }: LlmOptions): Llm {
 			} else {
 				apiKey = update.apiKey?.trim() || null;
 			}
-			const next: Saved = { baseUrl, apiKey, model: update.model?.trim() || DEFAULT_MODEL };
+			const next: Saved = {
+				baseUrl,
+				apiKey,
+				model: update.model?.trim() || DEFAULT_MODEL,
+				...(update.maxTokens === undefined ? {} : { maxTokens: update.maxTokens }),
+				...(update.timeoutMs === undefined ? {} : { timeoutMs: update.timeoutMs }),
+			};
 			writeSaved(file, next);
 			saved = next;
 			return null;
