@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.0](https://github.com/TheRockPusher/dawnskill/compare/v0.4.0...v0.5.0) (2026-10-18)
+
+
+### Features
+
+* **agents:** plan from supplied curricula instead of handing planning back ([fa71ab6](https://github.com/TheRockPusher/dawnskill/commit/fa71ab66400da24d965b9a944281aca8ddbe99f2))
+* **core:** tasks can develop skills without blocking on them ([b10b6d6](https://github.com/TheRockPusher/dawnskill/commit/b10b6d6136f0ed3f0e5f470a27b9265762cca89a))
+* **host:** read source pages before planning and save reply limits ([c6ee5cd](https://github.com/TheRockPusher/dawnskill/commit/c6ee5cd5a796e3bf7106598261ef13fe78836dba))
+* **web:** sources, whole-curriculum toggle and skills a task builds ([6808089](https://github.com/TheRockPusher/dawnskill/commit/68080891fcdd53c2883cb7bbc54c2882022329c9))
+
+
+### Documentation
+
+* curriculum planning, develops link and reply limits; add the planner-curriculum verify recipe ([fdd2c78](https://github.com/TheRockPusher/dawnskill/commit/fdd2c78e9dad0221ccb5f56902a9b5f4087bb3b0))
+
 ## [0.4.0](https://github.com/TheRockPusher/dawnskill/compare/v0.3.0...v0.4.0) (2026-10-17)
 
 
