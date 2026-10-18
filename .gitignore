@@ -10,3 +10,10 @@ coverage/
 .env.*
 !.env.example
 .omp/evidence/
+# Saved model settings (API key) and SQLite stores, wherever DATA_DIR points
+llm-settings.json
+*.db
+*.db-wal
+*.db-shm
+*.log
+.DS_Store
