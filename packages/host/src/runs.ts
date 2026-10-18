@@ -4,22 +4,25 @@ import type { ProposalId } from "@dawnskill/core";
 import {
 	type ChatProvider,
 	PlannerError,
+	type PlannerSource,
 	type PlannerStage,
 	type PlannerStreamEvent,
 	planGoal,
 } from "@dawnskill/agents";
 import type { Store } from "./db/store.ts";
+import { fetchSources } from "./sources.ts";
 
 type RunStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 
-/** Live view of the planner's model calls; `tokens` counts streamed chunks (≈ tokens). */
+/** Live view of the run's page reads and model calls; `tokens` counts streamed chunks (≈ tokens). */
 export interface RunProgress {
-	readonly stage: PlannerStage;
+	/** `fetch` while a source page is read, before the first model request. */
+	readonly stage: PlannerStage | "fetch";
 	/** Model requests started in this run (stages, repairs and dedupe checks). */
 	readonly requests: number;
 	/** Tail of the current request's thinking, at most 4000 chars. */
 	readonly reasoning: string;
-	/** Tail of the current request's answer text, at most 2000 chars. */
+	/** Tail of the current request's answer text, at most 2000 chars; while fetching, the URL being read. */
 	readonly output: string;
 	/** Chunks streamed in the current request (≈ tokens). */
 	readonly tokens: number;
@@ -32,9 +35,14 @@ export interface RunProgress {
 export interface PlanRun {
 	readonly id: string;
 	readonly goal: string;
+	/** Pages read before planning: the request's list, then links found in the goal and context. */
+	readonly sources: readonly string[];
+	/** The planner may cover a provided curriculum in full: no task or minute cap. */
+	readonly uncapped: boolean;
 	readonly status: RunStatus;
-	/** Model attempts (first answer plus repairs); 0 when the provider failed before any answer. */
+	/** Model attempts (first answer plus repairs); 0 when no answer arrived (unreadable page, provider failure). */
 	readonly attempts: number;
+	/** Why the run failed; a page that could not be read fails it with `could not read <url>: <reason>`. */
 	readonly error: string | null;
 	/** Validation errors of the last attempt when the planner gave up. */
 	readonly errors: readonly string[];
@@ -43,14 +51,26 @@ export interface PlanRun {
 	/** Null while the run waits behind earlier runs. */
 	readonly startedAt: string | null;
 	readonly finishedAt: string | null;
-	/** Null until the first model request; the finished run keeps its last state. */
+	/** Null until the first page read or model request; the finished run keeps its last state. */
 	readonly progress: RunProgress | null;
 }
 
 interface PlanInput {
 	readonly goal: string;
 	readonly context: string;
+	readonly sources: readonly string[];
+	readonly uncapped: boolean;
 	readonly supersedes: ProposalId | null;
+}
+
+/** Reads source pages in order; rejects with a `SourceError` on the first unreadable page, or when `signal` aborts. */
+export type SourceLoader = (urls: readonly string[], signal: AbortSignal) => Promise<readonly PlannerSource[]>;
+
+interface PlanRunsOptions {
+	/** Monotonic milliseconds for the token rate and the progress throttle. */
+	readonly now?: () => number;
+	/** Default: `fetchSources` over the network; tests pass a fake. */
+	readonly loadSources?: SourceLoader;
 }
 
 export interface PlanRuns {
@@ -67,12 +87,15 @@ export interface PlanRuns {
 	subscribe(listener: (run: PlanRun) => void): () => void;
 	/**
 	 * Cancels a queued or running run: it is published as `cancelled` at once and never proposes. A running
-	 * run's model request is aborted; the next queued run starts once that request has unwound.
+	 * run's page read or model request is aborted; the next queued run starts once that has unwound.
 	 */
 	cancel(id: string): CancelResult;
 	/** Cancels every queued and running run (shutdown). */
 	cancelAll(): void;
-	/** Called on every new model request and at most every 250 ms while chunks stream; never on status changes. */
+	/**
+	 * Called before each source page is read, on every new model request and at most every 250 ms while chunks
+	 * stream; never on status changes.
+	 */
 	subscribeProgress(listener: (id: string, progress: RunProgress) => void): () => void;
 }
 
@@ -94,11 +117,13 @@ const PROGRESS_MS = 250;
 const REASONING_TAIL = 4000;
 const OUTPUT_TAIL = 2000;
 
-/** `now`: monotonic milliseconds for the token rate and the progress throttle. */
 export function createPlanRuns(
 	store: Store,
 	clock: () => string,
-	now: () => number = () => performance.now(),
+	{
+		now = () => performance.now(),
+		loadSources = (urls, signal) => fetchSources(urls, { signal }),
+	}: PlanRunsOptions = {},
 ): PlanRuns {
 	let runs: readonly PlanRun[] = [];
 	let counter = 0;
@@ -132,7 +157,7 @@ export function createPlanRuns(
 		notify(progressListeners, id, progress);
 	}
 
-	/** Folds the planner's stream events into the run's progress; events after `settle()` or a cancel are ignored. */
+	/** Folds page reads and the planner's stream events into the run's progress; ignored after `settle()` or a cancel. */
 	function track(id: string, signal: AbortSignal) {
 		let progress: RunProgress | null = null;
 		let first = 0;
@@ -147,6 +172,19 @@ export function createPlanRuns(
 			progress: () => progress,
 			settle: () => {
 				settled = true;
+			},
+			fetching: (url: string): void => {
+				if (settled || signal.aborted) return;
+				progress = {
+					stage: "fetch",
+					requests: 0,
+					reasoning: "",
+					output: url,
+					tokens: 0,
+					totalTokens: 0,
+					tokensPerSecond: null,
+				};
+				send(now());
 			},
 			onStream: (event: PlannerStreamEvent): void => {
 				if (settled || signal.aborted) return;
@@ -190,10 +228,18 @@ export function createPlanRuns(
 		const tracker = track(run.id, signal);
 		let finished: PlanRun;
 		try {
+			// One page per call, so progress names the page being read.
+			const sources: PlannerSource[] = [];
+			for (const url of input.sources) {
+				tracker.fetching(url);
+				sources.push(...(await loadSources([url], signal)));
+				// A loader may finish despite the abort; a cancelled run reads no further and never reaches the model.
+				signal.throwIfAborted();
+			}
 			const result = await planGoal(
 				provider,
 				store.state,
-				{ goal: input.goal, context: input.context },
+				{ goal: input.goal, context: input.context, sources, uncapped: input.uncapped },
 				{ signal, onStream: tracker.onStream },
 			);
 			// A provider may finish despite the abort; a cancelled run must never propose.
@@ -274,6 +320,8 @@ export function createPlanRuns(
 				startedAt: null,
 				finishedAt: null,
 				progress: null,
+				sources: input.sources,
+				uncapped: input.uncapped,
 			};
 			queue.push({ run, input, provider });
 			publish(run);

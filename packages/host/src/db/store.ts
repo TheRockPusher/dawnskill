@@ -239,6 +239,8 @@ function projectionWriter(db: DatabaseSync): Writer {
 	);
 	const deleteRequirements = db.prepare("DELETE FROM task_requirements WHERE task_id = ?");
 	const insertRequirement = db.prepare("INSERT INTO task_requirements (task_id, skill, level) VALUES (?, ?, ?)");
+	const deleteDevelops = db.prepare("DELETE FROM task_develops WHERE task_id = ?");
+	const insertDevelops = db.prepare("INSERT INTO task_develops (task_id, skill, level) VALUES (?, ?, ?)");
 	const insertCompletion = db.prepare(
 		`INSERT INTO completions (id, task_id, status, actual_minutes, estimate_minutes, category, outcome, evidence_url, at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -254,6 +256,11 @@ function projectionWriter(db: DatabaseSync): Writer {
 		if (old?.requirements === task.requirements) return;
 		if (old !== undefined) deleteRequirements.run(task.id);
 		for (const { skill, level } of task.requirements) insertRequirement.run(task.id, skill, level);
+	};
+	const writeDevelops = (task: Task, old: Task | undefined): void => {
+		if (old !== undefined && old.develops === task.develops) return;
+		if (old !== undefined) deleteDevelops.run(task.id);
+		for (const { skill, level } of task.develops ?? []) insertDevelops.run(task.id, skill, level);
 	};
 	// INSERT and UPDATE bind the task columns in this one order.
 	const taskColumns = (t: Task) =>
@@ -321,6 +328,7 @@ function projectionWriter(db: DatabaseSync): Writer {
 			if (old !== undefined) continue;
 			insertTask.run(task.id, ...taskColumns(task));
 			writeRequirements(task, undefined);
+			writeDevelops(task, undefined);
 		}
 		for (let i = prev.completions.length; i < next.completions.length; i++) {
 			const c = next.completions[i];
@@ -341,6 +349,7 @@ function projectionWriter(db: DatabaseSync): Writer {
 			if (old === undefined) continue;
 			updateTask.run(...taskColumns(task), task.id);
 			writeRequirements(task, old);
+			writeDevelops(task, old);
 		}
 
 		if (prev.blockers !== next.blockers) {

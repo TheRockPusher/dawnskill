@@ -224,7 +224,12 @@ function draftSkill(key: SkillKey, prerequisites: readonly SkillKey[]): PlanDraf
 	};
 }
 
-function draftTask(ref: string, requires: PlanDraft["tasks"][number]["requires"], after: readonly string[]) {
+function draftTask(
+	ref: string,
+	requires: PlanDraft["tasks"][number]["requires"],
+	after: readonly string[],
+	develops: NonNullable<PlanDraft["tasks"][number]["develops"]> = [],
+): PlanDraft["tasks"][number] {
 	return {
 		ref,
 		title: `Build ${ref}`,
@@ -235,8 +240,9 @@ function draftTask(ref: string, requires: PlanDraft["tasks"][number]["requires"]
 		importance: 3,
 		urgency: 3,
 		requires,
+		...(develops.length === 0 ? {} : { develops }),
 		after,
-	} as const satisfies PlanDraft["tasks"][number];
+	};
 }
 
 /** A follow-up plan: a new skill on top of the first plan's first skill. */
@@ -305,9 +311,13 @@ const STEPS = {
 		type: "TaskEdited",
 		taskId: pick(taskIds(s), a),
 		patch:
-			b % 2 === 0
+			b % 4 === 0
 				? { title: `Edited ${b}` }
-				: { requirements: [{ skill: pick(Object.keys(s.skills), b), level: ((b % 3) + 1) as TargetLevel }] },
+				: b % 4 === 1
+					? { requirements: [{ skill: pick(Object.keys(s.skills), b), level: ((b % 3) + 1) as TargetLevel }] }
+					: b % 4 === 2
+						? { develops: [{ skill: pick(Object.keys(s.skills), b), level: ((b % 2) + 4) as TargetLevel }] }
+						: { develops: [] },
 	}),
 	selfRate: (s, a, b) => ({
 		type: "SkillSelfRated",
@@ -357,6 +367,11 @@ const scenarioArb: fc.Arbitrary<Scenario> = fc
 					minLength: SKILL_KEYS.length,
 					maxLength: SKILL_KEYS.length,
 				}),
+				// Developed level per skill index; null = not developed. Kept above the required level.
+				develops: fc.array(fc.constantFrom<TargetLevel | null>(null, null, 4, 5), {
+					minLength: SKILL_KEYS.length,
+					maxLength: SKILL_KEYS.length,
+				}),
 				after: fc.array(fc.nat(), { maxLength: 2 }),
 			}),
 			{ minLength: 1, maxLength: 4 },
@@ -375,7 +390,7 @@ const scenarioArb: fc.Arbitrary<Scenario> = fc
 			goal: "Ship the reporting service",
 			summary: "A small service with typed queries",
 			skills: keys.map((key, i) => draftSkill(key, chained && i > 0 ? keys.slice(i - 1, i) : [])),
-			tasks: tasks.map(({ requires, after }, i) =>
+			tasks: tasks.map(({ requires, develops, after }, i) =>
 				draftTask(
 					`t${i}`,
 					keys.flatMap((skill, k) => {
@@ -383,6 +398,10 @@ const scenarioArb: fc.Arbitrary<Scenario> = fc
 						return level === null ? [] : [{ skill, level }];
 					}),
 					i === 0 ? [] : [...new Set(after.map((n) => `t${n % i}`))],
+					keys.flatMap((skill, k) => {
+						const level = develops[k] ?? null;
+						return level === null ? [] : [{ skill, level }];
+					}),
 				),
 			),
 		};
@@ -470,6 +489,7 @@ function projection(db: DatabaseSync): Record<string, string[]> {
 				coalesce(learning ->> '$.skill', '-') AS v FROM tasks ORDER BY v`,
 		),
 		requirements: column(db, "SELECT task_id || ' ' || skill || ' ' || level AS v FROM task_requirements ORDER BY v"),
+		develops: column(db, "SELECT task_id || ' ' || skill || ' ' || level AS v FROM task_develops ORDER BY v"),
 		dependencies: column(db, "SELECT task_id || ' ' || blocker_id AS v FROM dependencies ORDER BY v"),
 		skills: column(db, "SELECT key || ' ' || coalesce(level, '-') AS v FROM skills ORDER BY v"),
 		prerequisites: column(db, "SELECT skill || ' ' || prerequisite AS v FROM skill_prerequisites ORDER BY v"),
@@ -494,6 +514,7 @@ function expectedProjection(s: KernelState): Record<string, string[]> {
 	return {
 		tasks: tasks.map((t) => `${t.id} ${t.status} ${t.updatedAt} ${t.goalId ?? "-"} ${t.learning?.skill ?? "-"}`).sort(),
 		requirements: tasks.flatMap((t) => t.requirements.map((r) => `${t.id} ${r.skill} ${r.level}`)).sort(),
+		develops: tasks.flatMap((t) => (t.develops ?? []).map((r) => `${t.id} ${r.skill} ${r.level}`)).sort(),
 		dependencies: Object.entries(s.blockers)
 			.flatMap(([taskId, ids]) => ids.map((blockerId) => `${taskId} ${blockerId}`))
 			.sort(),

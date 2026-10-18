@@ -10,7 +10,8 @@ import { streamSSE } from "hono/streaming";
 import type { Store } from "./db/store.ts";
 import type { Llm } from "./llm.ts";
 import { MAX_PENDING, type PlanRun, type PlanRuns } from "./runs.ts";
-import { parseEventBody, parseLlmUpdate, parsePlanRequest } from "./schemas.ts";
+import { MAX_SOURCES, parseEventBody, parseLlmUpdate, parsePlanRequest } from "./schemas.ts";
+import { findUrls } from "./sources.ts";
 
 interface ApiOptions {
 	readonly store: Store;
@@ -108,7 +109,13 @@ export function createApi({ store, runs, llm, clock, version }: ApiOptions): Hon
 		if (!json.ok) return c.json({ error: "invalid JSON body", details: [] }, 400);
 		const parsed = parsePlanRequest(json.value);
 		if (!parsed.ok) return c.json({ error: parsed.error, details: parsed.details }, 400);
-		const { goal, context = "", supersedes = null } = parsed.value;
+		const { goal, context = "", supersedes = null, sources: listed = [], uncapped = false } = parsed.value;
+		// Links pasted into the goal or context are read as well, after the listed ones.
+		const sources = [...new Set([...listed, ...findUrls(`${goal}\n${context}`)])];
+		if (sources.length > MAX_SOURCES) {
+			const detail = `/sources = ${sources.length} URLs (with goal and context links); legal: at most ${MAX_SOURCES}`;
+			return c.json({ error: `invalid plan request: ${detail}`, details: [detail] }, 400);
+		}
 		// Fail fast before spending model time; the kernel re-checks when the run proposes.
 		if (supersedes !== null) {
 			const old = Object.hasOwn(store.state.proposals, supersedes) ? store.state.proposals[supersedes] : undefined;
@@ -117,7 +124,7 @@ export function createApi({ store, runs, llm, clock, version }: ApiOptions): Hon
 				return c.json({ code: "invalid", message }, 409);
 			}
 		}
-		const run = runs.start({ goal, context, supersedes }, provider);
+		const run = runs.start({ goal, context, sources, uncapped, supersedes }, provider);
 		if (run === null) {
 			return c.json({ code: "busy", message: `the plan queue is full (${MAX_PENDING} runs queued or running)` }, 409);
 		}

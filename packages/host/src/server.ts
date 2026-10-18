@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { createApi } from "./api.ts";
 import type { Store } from "./db/store.ts";
 import type { Llm } from "./llm.ts";
-import { type PlanRuns, createPlanRuns } from "./runs.ts";
+import { type PlanRuns, type SourceLoader, createPlanRuns } from "./runs.ts";
 
 export interface AppOptions {
 	readonly store: Store;
@@ -18,6 +18,8 @@ export interface AppOptions {
 	readonly webDir: string;
 	/** Version reported by `GET /healthz`, `/api/config` and exports. */
 	readonly version: string;
+	/** Reads a plan's source pages; default `fetchSources` over the network. Tests pass a fake. */
+	readonly loadSources?: SourceLoader;
 }
 
 export interface App {
@@ -29,8 +31,8 @@ export interface App {
 const IMMUTABLE = "public, max-age=31536000, immutable";
 
 export function createApp(options: AppOptions): App {
-	const { store, llm, clock, webDir, version } = options;
-	const runs = createPlanRuns(store, clock);
+	const { store, llm, clock, webDir, version, loadSources } = options;
+	const runs = createPlanRuns(store, clock, loadSources === undefined ? {} : { loadSources });
 	const app = new Hono();
 
 	app.onError((error, c) => {
