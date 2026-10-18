@@ -659,6 +659,15 @@ p.run-live {
 	font-variant-numeric: tabular-nums;
 }
 
+.run-sources {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.25rem;
+	margin: 0;
+	overflow-wrap: anywhere;
+}
+
 .run-thinking {
 	max-height: 16rem;
 	overflow-y: auto;

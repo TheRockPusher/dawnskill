@@ -90,6 +90,9 @@ interface Preset {
 	readonly model: string;
 	readonly keyUrl: string;
 	readonly note: string;
+	/** Filled into Max reply tokens and Timeout: hosted models reason before answering and need room for it. */
+	readonly maxTokens: number;
+	readonly timeoutSeconds: number;
 }
 
 /** Hosted services whose chat-completions endpoint ran the planner end to end on 2026-10-16 (README). */
@@ -100,7 +103,9 @@ const PRESETS: readonly Preset[] = [
 		baseUrl: "https://opencode.ai/inference/go/openai/v1",
 		model: "longcat-2.0",
 		keyUrl: "https://opencode.ai/console",
-		note: "Only models on Go's chat-completions endpoint work. Its models reason before answering: if runs time out or are cut off, raise DAWNSKILL_LLM_TIMEOUT_MS and DAWNSKILL_LLM_MAX_TOKENS on the host.",
+		note: "Only models on Go's chat-completions endpoint work. Its models reason before answering, and the thinking counts against Max reply tokens: if runs time out or are cut off while thinking, raise Max reply tokens and Timeout below.",
+		maxTokens: 32_768,
+		timeoutSeconds: 300,
 	},
 	{
 		id: "openrouter",
@@ -109,9 +114,14 @@ const PRESETS: readonly Preset[] = [
 		model: "anthropic/claude-haiku-5.5",
 		keyUrl: "https://openrouter.ai/keys",
 		note: "Reaches Claude, GPT and open models. Choose one that lists structured outputs among its supported parameters.",
+		maxTokens: 32_768,
+		timeoutSeconds: 300,
 	},
 ];
 const CUSTOM = "custom";
+/** Bounds the host accepts (`PUT /api/settings/llm`). */
+const MAX_TOKENS = { min: 256, max: 262_144 } as const;
+const TIMEOUT_SECONDS = { min: 1, max: 3600 } as const;
 
 function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
 	const savedKey = llm.source === "app" && llm.hasApiKey;
@@ -120,6 +130,8 @@ function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
 	const [baseUrl, setBaseUrl] = useState(llm.baseUrl ?? "");
 	const [model, setModel] = useState(llm.source === "app" ? (llm.model ?? "") : "");
 	const [apiKey, setApiKey] = useState("");
+	const [maxTokens, setMaxTokens] = useState(String(llm.maxTokens));
+	const [timeoutSeconds, setTimeoutSeconds] = useState(String(llm.timeoutMs / 1000));
 	const [removeKey, setRemoveKey] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -130,6 +142,8 @@ function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
 		if (next === undefined) return;
 		setBaseUrl(next.baseUrl);
 		setModel(next.model);
+		setMaxTokens(String(next.maxTokens));
+		setTimeoutSeconds(String(next.timeoutSeconds));
 	};
 	const run = async (action: () => Promise<{ ok: true } | { ok: false; message: string }>): Promise<void> => {
 		setBusy(true);
@@ -145,6 +159,8 @@ function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
 				model: model.trim(),
 				// Blank keeps the saved key; the host refuses that when the URL changed.
 				...(removeKey ? { apiKey: null } : apiKey.trim() === "" ? {} : { apiKey: apiKey.trim() }),
+				maxTokens: Number(maxTokens),
+				timeoutMs: Math.round(Number(timeoutSeconds) * 1000),
 			}),
 		);
 	const remove = (): void => {
@@ -238,6 +254,34 @@ function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
 						.
 					</p>
 				)}
+				<label>
+					Max reply tokens
+					<input
+						type="number"
+						required
+						min={MAX_TOKENS.min}
+						max={MAX_TOKENS.max}
+						step={1}
+						value={maxTokens}
+						onInput={(e) => setMaxTokens(e.currentTarget.value)}
+					/>
+				</label>
+				<label>
+					Timeout (seconds)
+					<input
+						type="number"
+						required
+						min={TIMEOUT_SECONDS.min}
+						max={TIMEOUT_SECONDS.max}
+						step="any"
+						value={timeoutSeconds}
+						onInput={(e) => setTimeoutSeconds(e.currentTarget.value)}
+					/>
+				</label>
+				<p class="muted">
+					Per request. Reasoning models spend reply tokens on thinking before they answer: hosted ones need about 32768
+					tokens and 300 s; a local llama.cpp or Ollama server works with 4096 and 120 s within its context size.
+				</p>
 				{savedKey ? (
 					<label>
 						<input type="checkbox" checked={removeKey} onChange={(e) => setRemoveKey(e.currentTarget.checked)} />
@@ -260,7 +304,8 @@ function ModelSettings({ llm }: { readonly llm: LlmStatus }) {
 				<summary>Configure with environment variables instead</summary>
 				<p>Set these before starting the host. They apply while no settings are saved here.</p>
 				<pre>
-					DAWNSKILL_LLM_BASE_URL=http://localhost:8080/v1{"\n"}DAWNSKILL_LLM_API_KEY=…{"\n"}DAWNSKILL_LLM_MODEL=…
+					DAWNSKILL_LLM_BASE_URL=http://localhost:8080/v1{"\n"}DAWNSKILL_LLM_API_KEY=…{"\n"}DAWNSKILL_LLM_MODEL=…{"\n"}
+					DAWNSKILL_LLM_MAX_TOKENS=4096{"\n"}DAWNSKILL_LLM_TIMEOUT_MS=120000
 				</pre>
 			</details>
 		</section>
