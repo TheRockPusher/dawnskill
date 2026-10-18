@@ -18,6 +18,7 @@ import {
 	LevelBadge,
 	minutes,
 	RunLive,
+	RunSources,
 	RunStatusChip,
 	ScoreBreakdown,
 	SkillLink,
@@ -182,6 +183,7 @@ function RunItem({ view, run }: { readonly view: View; readonly run: PlanRun }) 
 				) : null}
 				<CancelRunButton run={run} />
 			</div>
+			<RunSources run={run} />
 			<RunLive run={run} />
 			{run.status === "failed" ? (
 				<div class="stack">
@@ -479,6 +481,21 @@ function FocusItem({ view, tv }: { readonly view: View; readonly tv: TaskView })
 					})}
 				</div>
 			) : null}
+			{task.develops !== undefined && task.develops.length > 0 ? (
+				<div class="row small">
+					<span class="muted">Builds:</span>
+					{task.develops.map((d) => (
+						<span
+							key={d.skill}
+							class="row focus-req"
+							title={`Completing it proposes ${LEVEL_NAMES[d.level]}; you confirm after evaluating`}
+						>
+							<SkillLink view={view} skillKey={d.skill} />
+							<LevelBadge level={d.level} />
+						</span>
+					))}
+				</div>
+			) : null}
 			{score ? (
 				<details>
 					<summary>Why this rank</summary>
@@ -502,6 +519,8 @@ function FocusItem({ view, tv }: { readonly view: View; readonly tv: TaskView })
 
 function CompleteForm({ tv, onClose }: { readonly tv: TaskView; readonly onClose: () => void }) {
 	const isLearning = tv.task.learning !== null;
+	// Learning steps and tasks that build a skill turn the outcome into level-proposal evidence.
+	const needsOutcome = isLearning || (tv.task.develops?.length ?? 0) > 0;
 	const [actual, setActual] = useState("");
 	const [outcome, setOutcome] = useState("");
 	const [url, setUrl] = useState("");
@@ -542,13 +561,17 @@ function CompleteForm({ tv, onClose }: { readonly tv: TaskView; readonly onClose
 				</p>
 			) : null}
 			<label>
-				{isLearning ? "What did you learn? (required)" : "Outcome (optional)"}
+				{isLearning
+					? "What did you learn? (required)"
+					: needsOutcome
+						? "What did you produce or learn? (required)"
+						: "Outcome (optional)"}
 				<textarea
 					value={outcome}
 					rows={2}
-					required={isLearning}
+					required={needsOutcome}
 					placeholder={
-						isLearning
+						needsOutcome
 							? "In your own words: what you can do now and how you proved it"
 							: "What was achieved, anything worth remembering"
 					}
@@ -574,11 +597,16 @@ function CompleteForm({ tv, onClose }: { readonly tv: TaskView; readonly onClose
 			</div>
 			{isLearning ? (
 				<p class="muted small">Completing a learning step proposes the new level; you confirm it under “Needs you”.</p>
+			) : needsOutcome ? (
+				<p class="muted small">
+					The outcome is the evidence for the skill level this task proposes; you confirm it under “Needs you” after
+					evaluating.
+				</p>
 			) : (
 				<p class="muted small">Tracked minutes calibrate future estimates in “{tv.task.category}”.</p>
 			)}
 			<div class="row">
-				<button type="submit" class="primary" disabled={busy || (isLearning && outcome.trim() === "")}>
+				<button type="submit" class="primary" disabled={busy || (needsOutcome && outcome.trim() === "")}>
 					{busy ? "Saving…" : "Mark done"}
 				</button>
 				<button type="button" class="secondary" onClick={onClose}>

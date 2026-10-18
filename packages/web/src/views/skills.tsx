@@ -745,6 +745,10 @@ export function SkillDetail({ view, skillKey }: { readonly view: View; readonly 
 		.map((id) => taskById(view, id))
 		.filter((t) => t !== undefined)
 		.sort((a, b) => (a.task.learning?.targetLevel ?? 0) - (b.task.learning?.targetLevel ?? 0));
+	const developedBy = view.tasks.flatMap(({ task }) => {
+		const entry = task.status === "cancelled" ? undefined : task.develops?.find((d) => d.skill === skillKey);
+		return entry === undefined ? [] : [{ task, level: entry.level }];
+	});
 	return (
 		<div class="stack">
 			<p>
@@ -838,6 +842,39 @@ export function SkillDetail({ view, skillKey }: { readonly view: View; readonly 
 					</table>
 				)}
 			</section>
+
+			{developedBy.length > 0 ? (
+				<section class="panel">
+					<h2>Developed by</h2>
+					<p class="muted">
+						Tasks that build this skill. They never wait on it; completing one proposes its level for you to confirm.
+					</p>
+					<table class="list">
+						<thead>
+							<tr>
+								<th>Task</th>
+								<th>Status</th>
+								<th>Builds to</th>
+							</tr>
+						</thead>
+						<tbody>
+							{developedBy.map(({ task, level }) => (
+								<tr key={task.id}>
+									<td>
+										<TaskLink view={view} id={task.id} />
+									</td>
+									<td>
+										<StatusChip status={task.status} />
+									</td>
+									<td>
+										<LevelBadge level={level} /> {LEVEL_NAMES[level]}
+									</td>
+								</tr>
+							))}
+						</tbody>
+					</table>
+				</section>
+			) : null}
 
 			<section class="panel">
 				<h2>Learning tasks</h2>

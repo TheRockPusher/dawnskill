@@ -3,7 +3,8 @@ import { useEffect, useState } from "preact/hooks";
 
 /** Mirrors the host's live planner progress (SSE `progress`, and the latest copy on each run). */
 export interface RunProgress {
-	readonly stage: "tasks" | "skills" | "dedupe";
+	/** "fetch" while the source pages are read, before the first model request. */
+	readonly stage: "fetch" | "extract" | "tasks" | "skills" | "dedupe";
 	/** Model requests started in this run (stages, repairs and dedupe checks). */
 	readonly requests: number;
 	/** Tail of the current request's thinking. */
@@ -22,6 +23,10 @@ export interface RunProgress {
 export interface PlanRun {
 	readonly id: string;
 	readonly goal: string;
+	/** Pages the run reads before planning (the request's `sources` plus URLs found in goal and context). */
+	readonly sources: readonly string[];
+	/** True when the user asked for the whole curriculum: no task or minute cap. */
+	readonly uncapped: boolean;
 	readonly status: "queued" | "running" | "done" | "failed" | "cancelled";
 	readonly attempts: number;
 	readonly error: string | null;
@@ -44,6 +49,9 @@ export interface LlmStatus {
 	/** Set only for settings saved in the app. */
 	readonly baseUrl: string | null;
 	readonly hasApiKey: boolean;
+	/** Effective `max_tokens` cap and request timeout (ms): saved in the app, else the host's environment or default. */
+	readonly maxTokens: number;
+	readonly timeoutMs: number;
 }
 
 interface AppConfig {
@@ -162,16 +170,24 @@ export async function sendEvent(body: EventBody): Promise<EventResult> {
 	}
 }
 
-/** Ask the planner agent for a draft; resolves once the run is accepted (202), not when it finishes. */
+/**
+ * Ask the planner agent for a draft; resolves once the run is accepted (202), not when it finishes.
+ * `sources` are page URLs the host reads first; `uncapped` plans a provided curriculum in full.
+ */
 export async function startPlan(
 	goal: string,
 	context: string,
 	supersedes: string | null,
+	options: { readonly sources?: readonly string[]; readonly uncapped?: boolean } = {},
 ): Promise<{ ok: true; runId: string } | { ok: false; message: string }> {
+	const body: Record<string, unknown> = { goal, context };
+	if (supersedes) body.supersedes = supersedes;
+	if (options.sources !== undefined && options.sources.length > 0) body.sources = options.sources;
+	if (options.uncapped) body.uncapped = true;
 	const response = await fetch("/api/plan", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify(supersedes ? { goal, context, supersedes } : { goal, context }),
+		body: JSON.stringify(body),
 	});
 	const json = (await response.json()) as ApiBody;
 	if (response.status === 202) {
@@ -194,12 +210,15 @@ export async function cancelPlan(runId: string): Promise<{ ok: true } | { ok: fa
 
 /**
  * Save the planner's model connection on the host. `apiKey` undefined keeps the saved key (only
- * allowed while the base URL is unchanged); null removes it.
+ * allowed while the base URL is unchanged); null removes it. `maxTokens` and `timeoutMs` override the
+ * host's DAWNSKILL_LLM_MAX_TOKENS and DAWNSKILL_LLM_TIMEOUT_MS.
  */
 export function saveLlmSettings(settings: {
 	readonly baseUrl: string;
 	readonly model: string;
 	readonly apiKey?: string | null;
+	readonly maxTokens: number;
+	readonly timeoutMs: number;
 }): Promise<{ ok: true } | { ok: false; message: string }> {
 	return updateLlm("PUT", JSON.stringify(settings));
 }

@@ -227,7 +227,11 @@ export function RunStatusChip({ view, run }: { readonly view: View; readonly run
 
 function runChip(view: View, run: PlanRun): readonly [label: string, cls: string] {
 	if (run.status === "queued") return ["queued", "state-unassessed"];
-	if (run.status === "running") return ["model planning…", "state-learning"];
+	if (run.status === "running") {
+		return run.progress?.stage === "fetch"
+			? ["reading sources…", "state-learning"]
+			: ["model planning…", "state-learning"];
+	}
 	if (run.status === "failed") return ["failed", "state-gap"];
 	if (run.status === "cancelled") return ["cancelled", "state-unassessed"];
 	const proposal = run.proposalId === null ? undefined : view.proposals.find((p) => p.id === run.proposalId);
@@ -246,10 +250,47 @@ function runChip(view: View, run: PlanRun): readonly [label: string, cls: string
 }
 
 const STAGE_LABEL: Readonly<Record<RunProgress["stage"], string>> = {
+	fetch: "reading sources",
+	extract: "extracting the curriculum",
 	tasks: "drafting tasks",
 	skills: "drafting skills",
 	dedupe: "checking duplicate skills",
 };
+
+/** Short link label: host without `www.` plus path, trailing slash dropped, ellipsized past 40 characters. */
+function sourceLabel(url: string): string {
+	let label = url;
+	try {
+		const parsed = new URL(url);
+		label = `${parsed.host.replace(/^www\./, "")}${parsed.pathname}${parsed.search}`.replace(/\/$/, "");
+	} catch {
+		// Not a parseable URL: show it as given.
+	}
+	return label.length > 40 ? `${label.slice(0, 39)}…` : label;
+}
+
+/** The pages a run reads (host and path, full URL on hover) and whether it plans the whole curriculum. */
+export function RunSources({ run }: { readonly run: PlanRun }) {
+	if (run.sources.length === 0 && !run.uncapped) return null;
+	return (
+		<p class="muted small run-sources">
+			{run.sources.length > 0 ? "sources: " : null}
+			{run.sources.map((url, i) => (
+				<span key={url}>
+					{i > 0 ? ", " : null}
+					<a href={url} target="_blank" rel="noreferrer" title={url}>
+						{sourceLabel(url)}
+					</a>
+				</span>
+			))}
+			{run.uncapped ? (
+				<span class="chip" title="Plans the whole curriculum: no task or minute limit">
+					all of it
+				</span>
+			) : null}
+		</p>
+	);
+}
 
 /** Live planner progress: stage, tokens and rate while running, optionally the model's thinking. */
 export function RunLive({ run }: { readonly run: PlanRun }) {
@@ -268,8 +309,10 @@ export function RunLive({ run }: { readonly run: PlanRun }) {
 		);
 	}
 	const stats = [STAGE_LABEL[progress.stage]];
-	if (progress.requests > 1) stats.push(`request ${progress.requests}`);
-	stats.push(`${progress.tokens} token${progress.tokens === 1 ? "" : "s"}`, rate);
+	if (progress.stage !== "fetch") {
+		if (progress.requests > 1) stats.push(`request ${progress.requests}`);
+		stats.push(`${progress.tokens} token${progress.tokens === 1 ? "" : "s"}`, rate);
+	}
 	return (
 		<div class="run-live">
 			<div class="row run-live-stats">

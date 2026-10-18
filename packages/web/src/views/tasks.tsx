@@ -652,6 +652,9 @@ export function TaskDetail({ view, id }: { readonly view: View; readonly id: str
 			<DetailsPanel view={view} tv={tv} />
 			{task.learning ? <LearningPanel view={view} task={task} /> : null}
 			{task.requirements.length > 0 ? <RequirementsPanel view={view} task={task} /> : null}
+			{task.develops !== undefined && task.develops.length > 0 ? (
+				<DevelopsPanel view={view} develops={task.develops} />
+			) : null}
 			<section class="panel">
 				<h2>Priority (MCDA)</h2>
 				{tv.score ? (
@@ -737,14 +740,21 @@ function CompleteForm({ task, onDone }: { readonly task: Task; readonly onDone: 
 	const [evidence, setEvidence] = useState("");
 	const { busy, error, setError, send } = useSend();
 	const learning = task.learning !== null;
+	const develops = task.develops ?? [];
+	// Learning steps and tasks that build a skill turn the outcome into level-proposal evidence.
+	const needsOutcome = learning || develops.length > 0;
 	const submit = async () => {
 		const actualMinutes = actual.trim() === "" ? null : parseMinutes(actual);
 		if (actual.trim() !== "" && actualMinutes === null) {
 			setError("Actual minutes must be a whole number, at least 1, or empty.");
 			return;
 		}
-		if (learning && outcome.trim() === "") {
-			setError("Say what you learned: it becomes the evidence for the level proposal.");
+		if (needsOutcome && outcome.trim() === "") {
+			setError(
+				learning
+					? "Say what you learned: it becomes the evidence for the level proposal."
+					: "Say what you produced or learned: it becomes the evidence for the skill level proposal.",
+			);
 			return;
 		}
 		const url = evidence.trim();
@@ -777,8 +787,12 @@ function CompleteForm({ task, onDone }: { readonly task: Task; readonly onDone: 
 				/>
 			</label>
 			<label>
-				{learning ? "What did you learn? (required)" : "Outcome"}
-				<textarea rows={3} required={learning} value={outcome} onInput={(e) => setOutcome(e.currentTarget.value)} />
+				{learning
+					? "What did you learn? (required)"
+					: needsOutcome
+						? "What did you produce or learn? (required)"
+						: "Outcome"}
+				<textarea rows={3} required={needsOutcome} value={outcome} onInput={(e) => setOutcome(e.currentTarget.value)} />
 			</label>
 			<label>
 				Evidence URL <span class="muted">(optional: commit, PR, notes)</span>
@@ -788,6 +802,13 @@ function CompleteForm({ task, onDone }: { readonly task: Task; readonly onDone: 
 				<p class="muted">
 					Completing proposes L{task.learning.targetLevel} {LEVEL_NAMES[task.learning.targetLevel]} for this skill. Your
 					level changes only when you confirm it.
+				</p>
+			) : null}
+			{develops.length > 0 ? (
+				<p class="muted">
+					The outcome is the evidence for the skill proposal: completing proposes{" "}
+					{develops.map((d) => `L${d.level} ${LEVEL_NAMES[d.level]} in ${d.skill}`).join(", ")} for any skill below that
+					level. Your level changes only when you confirm it after evaluating.
 				</p>
 			) : null}
 			<div class="row">
@@ -1030,6 +1051,46 @@ function RequirementsPanel({ view, task }: { readonly view: View; readonly task:
 									<LevelBadge level={current} /> {current === null ? "not assessed" : LEVEL_NAMES[current]}
 								</td>
 								<td>{met ? <span class="ready">met</span> : <span class="blocked">gap</span>}</td>
+							</tr>
+						);
+					})}
+				</tbody>
+			</table>
+		</section>
+	);
+}
+
+/** Skills the task builds: never a blocker; completing it proposes the level for each skill still below it. */
+function DevelopsPanel({ view, develops }: { readonly view: View; readonly develops: readonly Requirement[] }) {
+	return (
+		<section class="panel">
+			<h2>Builds skills</h2>
+			<p class="muted">
+				Doing this task develops these skills; it never waits on them. Completing it proposes each level you do not have
+				yet, with your outcome as evidence, and you confirm after evaluating.
+			</p>
+			<table class="list">
+				<thead>
+					<tr>
+						<th>Skill</th>
+						<th>Builds to</th>
+						<th>You</th>
+					</tr>
+				</thead>
+				<tbody>
+					{develops.map((d) => {
+						const current = view.skills.find((s) => s.skill.key === d.skill)?.skill.level ?? null;
+						return (
+							<tr key={d.skill}>
+								<td>
+									<SkillLink view={view} skillKey={d.skill} />
+								</td>
+								<td>
+									<LevelBadge level={d.level} /> {LEVEL_NAMES[d.level]}
+								</td>
+								<td>
+									<LevelBadge level={current} /> {current === null ? "not assessed" : LEVEL_NAMES[current]}
+								</td>
 							</tr>
 						);
 					})}

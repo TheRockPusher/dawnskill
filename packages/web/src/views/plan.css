@@ -207,6 +207,36 @@
 	font-weight: normal;
 }
 
+.plan-chip-remove {
+	padding: 0 0.25rem;
+	border: none;
+	background: transparent;
+	color: var(--muted);
+	line-height: 1;
+}
+
+.plan-chip-remove:hover:not(:disabled) {
+	background: transparent;
+	color: var(--danger);
+}
+
+.plan-after input {
+	max-width: 24rem;
+}
+
+/* Developed skills: distinct from required ones */
+.chip.plan-builds {
+	background: var(--accent-soft);
+	color: var(--accent);
+}
+
+/* New goal form */
+.plan-uncapped {
+	display: flex;
+	flex-direction: column;
+	gap: 0.2rem;
+}
+
 .plan-editor-footer {
 	position: sticky;
 	bottom: 0;

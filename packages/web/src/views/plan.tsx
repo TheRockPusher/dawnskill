@@ -10,6 +10,7 @@ import {
 	MIN_ESTIMATE_SAMPLES,
 	type PlanDraft,
 	type Proposal,
+	type Requirement,
 	type Resource,
 	SKILL_KEY_PATTERN,
 	type Skill,
@@ -31,6 +32,7 @@ import {
 	LEVEL_ANCHORS,
 	LevelBadge,
 	RunLive,
+	RunSources,
 	RunStatusChip,
 	SkillLink,
 	TaskLink,
@@ -282,6 +284,8 @@ function cleanDraft(d: PlanDraft): PlanDraft {
 			importance: t.importance,
 			urgency: t.urgency,
 			requires: t.requires,
+			// Absent when empty: the kernel never stores `develops: []`.
+			...(t.develops !== undefined && t.develops.length > 0 ? { develops: t.develops } : {}),
 			after: t.after,
 		})),
 	};
@@ -441,6 +445,7 @@ function RunStatus({ view, run }: { readonly view: View; readonly run: PlanRun }
 				) : null}
 				<CancelRunButton run={run} />
 			</div>
+			<RunSources run={run} />
 			<RunLive run={run} />
 			{run.error ? <p class="error">{run.error}</p> : null}
 			{run.errors.length > 0 ? (
@@ -479,6 +484,8 @@ function PlannerForm({ goal, supersedes }: { readonly goal: string | null; reado
 	const { runs, config, view } = useApp();
 	const [goalText, setGoalText] = useState("");
 	const [context, setContext] = useState("");
+	const [sources, setSources] = useState("");
+	const [uncapped, setUncapped] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [runId, setRunId] = useState<string | null>(null);
@@ -491,11 +498,17 @@ function PlannerForm({ goal, supersedes }: { readonly goal: string | null; reado
 		setBusy(true);
 		setError(null);
 		try {
-			const result = await startPlan(target, context.trim(), supersedes);
+			const urls = sources
+				.split("\n")
+				.map((line) => line.trim())
+				.filter((line) => line !== "");
+			const result = await startPlan(target, context.trim(), supersedes, { sources: urls, uncapped });
 			if (result.ok) {
 				setRunId(result.runId);
 				setGoalText("");
 				setContext("");
+				setSources("");
+				setUncapped(false);
 			} else setError(result.message);
 		} catch (e) {
 			setError(e instanceof Error ? e.message : String(e));
@@ -534,6 +547,27 @@ function PlannerForm({ goal, supersedes }: { readonly goal: string | null; reado
 				{goal === null ? "Context (optional): what you already know, constraints, deadline" : "What should change?"}
 				<textarea rows={3} value={context} onInput={(e) => setContext(e.currentTarget.value)} />
 			</label>
+			<label>
+				Sources (optional): curriculum or reading-list pages, one URL per line
+				<textarea
+					rows={3}
+					value={sources}
+					placeholder="https://example.org/reading-list"
+					onInput={(e) => setSources(e.currentTarget.value)}
+				/>
+				<span class="muted small">
+					The planner reads these pages before drafting. URLs in the goal or context are read too (10 pages at most).
+				</span>
+			</label>
+			<div class="plan-uncapped">
+				<label>
+					<input type="checkbox" checked={uncapped} onChange={(e) => setUncapped(e.currentTarget.checked)} />
+					Plan the whole curriculum (no task limit)
+				</label>
+				<span class="muted small">
+					Removes the 12-task / 8-hour caps, so a curriculum you provide is planned in full.
+				</span>
+			</div>
 			<div class="row">
 				<button type="submit" class="primary" disabled={busy || !configured || target.length === 0}>
 					{busy ? "Starting…" : goal === null ? "Ask the planner" : "Ask the planner for a new draft"}
@@ -681,6 +715,7 @@ function TasksTable({ view, draft }: { readonly view: View; readonly draft: Plan
 							<th title="Importance 1–5">Imp.</th>
 							<th title="Urgency 1–5">Urg.</th>
 							<th>Requires</th>
+							<th title="Skills the task develops; completing it proposes the level">Builds</th>
 							<th>After</th>
 						</tr>
 					</thead>
@@ -708,6 +743,23 @@ function TasksTable({ view, draft }: { readonly view: View; readonly draft: Plan
 											{t.requires.map((r) => (
 												<span key={r.skill} class="chip" title={`${LEVEL_NAMES[r.level]} required`}>
 													{names.get(r.skill) ?? r.skill} <LevelBadge level={r.level} />
+												</span>
+											))}
+										</div>
+									)}
+								</td>
+								<td>
+									{t.develops === undefined || t.develops.length === 0 ? (
+										<span class="muted">—</span>
+									) : (
+										<div class="plan-badges">
+											{t.develops.map((d) => (
+												<span
+													key={d.skill}
+													class="chip plan-builds"
+													title={`Completing it proposes ${LEVEL_NAMES[d.level]}`}
+												>
+													builds: {names.get(d.skill) ?? d.skill} <LevelBadge level={d.level} />
 												</span>
 											))}
 										</div>
@@ -1176,8 +1228,12 @@ function DraftEditor({
 	const knownKeys = [...new Set([...draft.skills.map((s) => s.key.trim()), ...savedKeys])]
 		.filter((k) => k.length > 0)
 		.sort();
-	const skillName = (key: SkillKey): string =>
-		draft.skills.find((s) => s.key === key)?.name || view.skills.find((s) => s.skill.key === key)?.skill.name || key;
+	// One map per render: the editor may hold 100+ tasks, each listing every known key.
+	const names = new Map<SkillKey, string>();
+	for (const s of view.skills) names.set(s.skill.key, s.skill.name);
+	for (const s of draft.skills) if (s.name) names.set(s.key, s.name);
+	const skillName = (key: SkillKey): string => names.get(key) || key;
+	const titles = new Map(draft.tasks.map((t) => [t.ref, t.title]));
 	const categories = [
 		...new Set([
 			"learning",
@@ -1233,10 +1289,14 @@ function DraftEditor({
 			return {
 				...d,
 				skills: d.skills.filter((_, j) => j !== i).map((s) => ({ ...s, prerequisites: s.prerequisites.filter(keep) })),
-				tasks: d.tasks.map((t) => ({ ...t, requires: t.requires.filter((r) => keep(r.skill)) })),
+				tasks: d.tasks.map((t) => ({
+					...t,
+					requires: t.requires.filter((r) => keep(r.skill)),
+					...(t.develops === undefined ? {} : { develops: t.develops.filter((r) => keep(r.skill)) }),
+				})),
 			};
 		});
-	/** Follow a committed key rename in requirements and prerequisites. */
+	/** Follow a committed key rename in requirements, developed skills and prerequisites. */
 	const renameSkill = (from: SkillKey, to: SkillKey): void => {
 		if (from === to || from === "" || savedKeys.has(from)) return;
 		setDraft((d) => {
@@ -1250,6 +1310,9 @@ function DraftEditor({
 				tasks: d.tasks.map((t) => ({
 					...t,
 					requires: t.requires.map((r) => (r.skill === from ? { ...r, skill: to } : r)),
+					...(t.develops === undefined
+						? {}
+						: { develops: t.develops.map((r) => (r.skill === from ? { ...r, skill: to } : r)) }),
 				})),
 			};
 		});
@@ -1307,6 +1370,13 @@ function DraftEditor({
 					<option key={c} value={c} />
 				))}
 			</datalist>
+			<datalist id="plan-task-refs">
+				{draft.tasks.map((t) => (
+					<option key={t.ref} value={t.ref}>
+						{t.title}
+					</option>
+				))}
+			</datalist>
 
 			<h2>Tasks ({draft.tasks.length})</h2>
 			<Errors errors={errors} prefix="tasks has" />
@@ -1316,6 +1386,7 @@ function DraftEditor({
 					task={t}
 					index={i}
 					draft={draft}
+					titles={titles}
 					knownKeys={knownKeys}
 					skillName={skillName}
 					errors={errors}
@@ -1388,6 +1459,7 @@ function TaskEditor({
 	task,
 	index,
 	draft,
+	titles,
 	knownKeys,
 	skillName,
 	errors,
@@ -1397,6 +1469,8 @@ function TaskEditor({
 	readonly task: DraftTask;
 	readonly index: number;
 	readonly draft: PlanDraft;
+	/** Draft task titles by ref, built once for the whole editor. */
+	readonly titles: ReadonlyMap<string, string>;
 	readonly knownKeys: readonly SkillKey[];
 	readonly skillName: (key: SkillKey) => string;
 	readonly errors: readonly string[];
@@ -1404,9 +1478,7 @@ function TaskEditor({
 	readonly onRemove: (() => void) | null;
 }) {
 	const id = `plan-task-${task.ref}`;
-	const used = new Set(task.requires.map((r) => r.skill));
-	const free = knownKeys.find((k) => !used.has(k));
-	const others = draft.tasks.filter((t) => t.ref !== task.ref);
+	const develops = task.develops ?? [];
 	return (
 		<article class="panel stack">
 			<div class="row">
@@ -1468,93 +1540,143 @@ function TaskEditor({
 				</Field>
 			</div>
 
-			<div class="stack">
-				<h4>Requires</h4>
-				{task.requires.length === 0 ? <p class="muted plan-small">No skill requirements.</p> : null}
-				{task.requires.map((r, j) => (
-					<div key={j} class="row plan-req">
-						<label>
-							Skill
-							<select
-								value={r.skill}
-								onChange={(e) =>
-									onChange({
-										requires: task.requires.map((x, k) => (k === j ? { ...x, skill: e.currentTarget.value } : x)),
-									})
-								}
-							>
-								{(knownKeys.includes(r.skill) ? knownKeys : [r.skill, ...knownKeys]).map((k) => (
-									<option key={k} value={k}>
-										{skillName(k)} ({k || "no key"})
-									</option>
-								))}
-							</select>
-						</label>
-						<label>
-							Level
-							<select
-								value={r.level}
-								onChange={(e) =>
-									onChange({
-										requires: task.requires.map((x, k) =>
-											k === j ? { ...x, level: Number(e.currentTarget.value) as TargetLevel } : x,
-										),
-									})
-								}
-							>
-								{TARGET_LEVELS.map((l) => (
-									<option key={l} value={l}>
-										L{l} {LEVEL_NAMES[l]}
-									</option>
-								))}
-							</select>
-						</label>
-						<button
-							type="button"
-							class="secondary"
-							onClick={() => onChange({ requires: task.requires.filter((_, k) => k !== j) })}
-						>
-							Remove
-						</button>
-					</div>
-				))}
-				<div class="row">
-					<button
-						type="button"
-						class="secondary"
-						disabled={free === undefined}
-						onClick={() => {
-							if (free !== undefined) onChange({ requires: [...task.requires, { skill: free, level: 1 }] });
-						}}
-					>
-						Add requirement
-					</button>
-					{knownKeys.length === 0 ? <span class="muted plan-small">Add a skill below first.</span> : null}
-				</div>
-			</div>
+			<SkillLevels
+				title="Requires"
+				hint="No skill requirements."
+				addLabel="Add requirement"
+				items={task.requires}
+				knownKeys={knownKeys}
+				skillName={skillName}
+				onChange={(requires) => onChange({ requires })}
+			/>
+			<SkillLevels
+				title="Builds"
+				hint="Develops no skill. Completing a task that builds a skill proposes the level; it never blocks."
+				addLabel="Add skill it builds"
+				items={develops}
+				knownKeys={knownKeys}
+				skillName={skillName}
+				onChange={(next) => onChange({ develops: next })}
+			/>
 
-			{others.length > 0 ? (
-				<fieldset class="plan-checks">
-					<legend>Do after</legend>
-					{others.map((o) => (
-						<label key={o.ref}>
-							<input
-								type="checkbox"
-								id={`${id}-after-${o.ref}`}
-								checked={task.after.includes(o.ref)}
-								onChange={(e) =>
-									onChange({
-										after: e.currentTarget.checked ? [...task.after, o.ref] : task.after.filter((a) => a !== o.ref),
-									})
-								}
-							/>
-							{o.title || o.ref}
-						</label>
-					))}
-				</fieldset>
+			{draft.tasks.length > 1 ? (
+				<div class="stack">
+					<h4>Do after</h4>
+					{task.after.length === 0 ? <p class="muted plan-small">No task has to finish first.</p> : null}
+					{task.after.length > 0 ? (
+						<div class="plan-badges">
+							{task.after.map((ref) => (
+								<span key={ref} class="chip">
+									<code>{ref}</code> {titles.get(ref) || ""}
+									<button
+										type="button"
+										class="plan-chip-remove"
+										aria-label={`Remove ${ref}`}
+										onClick={() => onChange({ after: task.after.filter((a) => a !== ref) })}
+									>
+										×
+									</button>
+								</span>
+							))}
+						</div>
+					) : null}
+					<label class="plan-after">
+						Add a task that must finish first (pick it, or type its ref or exact title)
+						<input
+							id={`${id}-after`}
+							list="plan-task-refs"
+							placeholder="t1"
+							onChange={(e) => {
+								const value = e.currentTarget.value.trim();
+								const ref = titles.has(value) ? value : draft.tasks.find((t) => t.title.trim() === value)?.ref;
+								if (ref === undefined || ref === task.ref) return;
+								if (!task.after.includes(ref)) onChange({ after: [...task.after, ref] });
+								e.currentTarget.value = "";
+							}}
+						/>
+					</label>
+				</div>
 			) : null}
 			<Errors errors={errors} prefix={`tasks[${index}]`} />
 		</article>
+	);
+}
+
+/** Editable skill/level list: a task's `requires` or the skills it `develops` (one entry per skill). */
+function SkillLevels({
+	title,
+	hint,
+	addLabel,
+	items,
+	knownKeys,
+	skillName,
+	onChange,
+}: {
+	readonly title: string;
+	readonly hint: string;
+	readonly addLabel: string;
+	readonly items: readonly Requirement[];
+	readonly knownKeys: readonly SkillKey[];
+	readonly skillName: (key: SkillKey) => string;
+	readonly onChange: (items: readonly Requirement[]) => void;
+}) {
+	const used = new Set(items.map((r) => r.skill));
+	const free = knownKeys.find((k) => !used.has(k));
+	return (
+		<div class="stack">
+			<h4>{title}</h4>
+			{items.length === 0 ? <p class="muted plan-small">{hint}</p> : null}
+			{items.map((r, j) => (
+				<div key={j} class="row plan-req">
+					<label>
+						Skill
+						<select
+							value={r.skill}
+							onChange={(e) => onChange(items.map((x, k) => (k === j ? { ...x, skill: e.currentTarget.value } : x)))}
+						>
+							{(knownKeys.includes(r.skill) ? knownKeys : [r.skill, ...knownKeys]).map((k) => (
+								<option key={k} value={k}>
+									{skillName(k)} ({k || "no key"})
+								</option>
+							))}
+						</select>
+					</label>
+					<label>
+						Level
+						<select
+							value={r.level}
+							onChange={(e) =>
+								onChange(
+									items.map((x, k) => (k === j ? { ...x, level: Number(e.currentTarget.value) as TargetLevel } : x)),
+								)
+							}
+						>
+							{TARGET_LEVELS.map((l) => (
+								<option key={l} value={l}>
+									L{l} {LEVEL_NAMES[l]}
+								</option>
+							))}
+						</select>
+					</label>
+					<button type="button" class="secondary" onClick={() => onChange(items.filter((_, k) => k !== j))}>
+						Remove
+					</button>
+				</div>
+			))}
+			<div class="row">
+				<button
+					type="button"
+					class="secondary"
+					disabled={free === undefined}
+					onClick={() => {
+						if (free !== undefined) onChange([...items, { skill: free, level: 1 }]);
+					}}
+				>
+					{addLabel}
+				</button>
+				{knownKeys.length === 0 ? <span class="muted plan-small">Add a skill below first.</span> : null}
+			</div>
+		</div>
 	);
 }
 
