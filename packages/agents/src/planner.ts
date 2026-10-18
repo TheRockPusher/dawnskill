@@ -1,8 +1,10 @@
 /**
- * Planner agent: goal → validated `PlanDraft`, in two stages so references are indices the schema
- * constrains: A writes tasks (`after` = earlier task indices), B the skills they need (`neededBy` =
- * task indices). Each stage is normalized, checked against its schema and core `validateDraft`, and
- * repaired in its own bounded loop that names every bad value (PLAN.md §5, "Agents propose only").
+ * Planner agent: goal → validated `PlanDraft`, in stages so references are indices the schema
+ * constrains. Supplied sources are first reduced to a curriculum (the study resources they
+ * recommend); A writes tasks (`after` = earlier task indices), B the skills they need or develop
+ * (`neededBy`/`developedBy` = task indices). Uncapped plans run A and B in batches. Each request is
+ * normalized, checked against its schema and core `validateDraft`, and repaired in its own bounded
+ * loop that names every bad value (PLAN.md §5, "Agents propose only").
  * The draft is a proposal; only the user can approve it.
  */
 import {
@@ -19,20 +21,38 @@ import {
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { dedupeSkills } from "./dedupe.ts";
-import { buildSkillsPrompt, buildTasksPrompt, type PlannerInput, type PlannerPrompt } from "./prompt.ts";
+import { type CurriculumItem, chunkText, halveChunk, MAX_CHUNK, mergeItems } from "./extract.ts";
+import {
+	buildExtractPrompt,
+	buildSkillsPrompt,
+	buildTasksPrompt,
+	type PlannerInput,
+	type PlannerPrompt,
+	type PlannerSource,
+} from "./prompt.ts";
 import { type ChatProvider, ContextSizeError, TruncatedReplyError } from "./provider.ts";
-import { skillsSchema, TASKS_SCHEMA } from "./schema.ts";
+import {
+	EXTRACT_SCHEMA,
+	MAX_SKILLS,
+	MAX_TASK_MINUTES,
+	MAX_TASKS,
+	MAX_UNCAPPED_TASK_MINUTES,
+	skillsSchema,
+	tasksSchema,
+} from "./schema.ts";
 
 const DEFAULT_MAX_REPAIRS = 2;
-/** Reply budget per stage; the provider caps it at its configured `maxTokens`. */
-const STAGE_MAX_TOKENS = 8192;
 const MAX_SKILL_KEY = 64;
 /** Kernel limit for `PlanDraft.goal` (core `validateDraft`). */
 const MAX_GOAL = 200;
+/** Uncapped plans: curriculum items per tasks request, tasks per item at most, tasks per skills request. */
+const ITEMS_PER_REQUEST = 8;
+const TASKS_PER_ITEM = 3;
+const TASKS_PER_SKILLS_REQUEST = 8;
 
 export interface PlanResult {
 	readonly draft: PlanDraft;
-	/** Plan generations used across both stages, repairs included. Skill-judge calls are not counted. */
+	/** Plan generations used across all stages, repairs included. Skill-judge calls are not counted. */
 	readonly attempts: number;
 	/** Draft skill key → existing key it was merged into by deduplication. */
 	readonly remapped: Readonly<Record<SkillKey, SkillKey>>;
@@ -57,16 +77,46 @@ type Checked<T> =
 	/** `shown`: what the repair turn quotes back, the normalized JSON or the raw text that did not parse. */
 	| { readonly ok: false; readonly shown: string; readonly errors: readonly string[] };
 
+/** Repairs and truncation splits spent on one request and every half split off it. */
+interface Budget {
+	repairs: number;
+}
+
+/** A truncated reply whose request the caller splits instead of retrying. */
+const TRUNCATED: unique symbol = Symbol("truncated");
+
+/** One stage A reply: `summary` is null when the request did not ask for one. */
+interface TasksReply {
+	readonly summary: string | null;
+	readonly tasks: readonly DraftTask[];
+}
+
 interface TasksStage {
 	readonly goal: string;
 	readonly summary: string;
 	readonly tasks: readonly DraftTask[];
 }
 
-export type PlannerStage = "tasks" | "skills" | "dedupe";
+/** Skill links of one task: skill → highest level. */
+type Links = Map<SkillKey, TargetLevel>;
+
+/** One stage B reply: its skills (state skills filled from state) and the links of its tasks. */
+interface SkillsReply {
+	readonly skills: readonly DraftSkill[];
+	readonly requires: ReadonlyMap<number, Links>;
+	readonly develops: ReadonlyMap<number, Links>;
+}
+
+export type PlannerStage = "extract" | "tasks" | "skills" | "dedupe";
 export type PlannerStreamEvent =
 	| { readonly type: "request"; readonly stage: PlannerStage } // before every model request, repairs included
 	| { readonly type: "delta"; readonly reasoning: string; readonly content: string };
+
+const STAGES: Readonly<Record<string, PlannerStage>> = {
+	plan_extract: "extract",
+	plan_tasks: "tasks",
+	plan_skills: "skills",
+};
 
 export async function planGoal(
 	provider: ChatProvider,
@@ -95,63 +145,229 @@ export async function planGoal(
 			: {
 					model: provider.model,
 					completeJson(request, signal) {
-						const stage: PlannerStage =
-							request.schemaName === "plan_tasks"
-								? "tasks"
-								: request.schemaName === "plan_skills"
-									? "skills"
-									: "dedupe";
-						onStream({ type: "request", stage });
+						onStream({ type: "request", stage: STAGES[request.schemaName] ?? "dedupe" });
 						return provider.completeJson(request, signal, (delta) =>
 							onStream({ type: "delta", reasoning: delta.reasoning, content: delta.content }),
 						);
 					},
 				};
-	/** One stage: generate, check, repair. `items` names what to cap after a truncated reply. */
+	/**
+	 * One request: generate, check, repair. After a truncated reply it retries asking for a reply
+	 * `shorter` as described, or returns `TRUNCATED` when `shorter` is null so the caller splits the request.
+	 * A reply that was all thinking is retried once unchanged; a second one fails.
+	 */
 	const generate = async <T>(
 		prompt: PlannerPrompt,
 		schemaName: string,
 		schema: TSchema,
-		items: string,
 		check: (raw: string) => Checked<T>,
-	): Promise<T> => {
+		budget: Budget,
+		shorter: string | null,
+	): Promise<T | typeof TRUNCATED> => {
 		let user = prompt.user;
-		for (let repairs = 0; ; repairs++) {
+		let thinkingRetried = false;
+		for (;;) {
 			attempts++;
-			const request = { system: prompt.system, user, schemaName, schema, maxTokens: STAGE_MAX_TOKENS };
+			// No maxTokens: the configured reply budget applies (reasoning models need all of it).
+			const request = { system: prompt.system, user, schemaName, schema };
 			let raw: string;
 			try {
 				raw = await model.completeJson(request, options.signal);
 			} catch (error) {
 				if (error instanceof ContextSizeError) throw new PlannerError([error.message], attempts, error.message);
 				if (!(error instanceof TruncatedReplyError)) throw error;
-				if (repairs === maxRepairs) throw new PlannerError([error.message], attempts);
+				// Thinking alone filled the reply budget: halving or asking for less cannot help, but runaway
+				// thinking is stochastic, so the identical request is retried once outside the repair budget.
+				if (error.thinkingOnly) {
+					if (thinkingRetried) throw new PlannerError([error.message], attempts, error.message);
+					thinkingRetried = true;
+					continue;
+				}
+				if (budget.repairs === maxRepairs) throw new PlannerError([error.message], attempts);
+				budget.repairs++;
+				if (shorter === null) return TRUNCATED;
 				// Echoing a runaway reply would only fill the context: restate the request and ask for less.
 				user = [
 					prompt.user,
 					"",
-					`Your previous reply was cut off before the JSON ended. Reply again with the same structure, shorter: at most 8 ${items}, one sentence per text field.`,
+					`Your previous reply was cut off before the JSON ended. Reply again with the same structure, shorter: ${shorter}.`,
 				].join("\n");
 				continue;
 			}
 			const checked = check(raw);
 			if (checked.ok) return checked.value;
-			if (repairs === maxRepairs) throw new PlannerError(checked.errors, attempts);
-			user = repairMessage(checked.shown, checked.errors);
+			if (budget.repairs === maxRepairs) throw new PlannerError(checked.errors, attempts);
+			budget.repairs++;
+			// The original request stays: without it the model no longer sees the tasks, items or text it answered.
+			user = `${prompt.user}\n\n${repairMessage(checked.shown, checked.errors)}`;
+		}
+	};
+	/**
+	 * Runs one request per unit, in order. A unit whose reply is truncated is replaced by its halves,
+	 * which share its repair budget; a unit that cannot be halved is retried with a `shorter` reply.
+	 */
+	const inOrder = async <U, T>(
+		units: readonly U[],
+		halve: (unit: U) => readonly U[] | null,
+		shorter: string,
+		run: (unit: U, budget: Budget, shorter: string | null) => Promise<T | typeof TRUNCATED>,
+		apply: (value: T) => void,
+	): Promise<void> => {
+		const queue = units.map((unit) => ({ unit, budget: { repairs: 0 } }));
+		for (;;) {
+			const next = queue.shift();
+			if (next === undefined) return;
+			const halves = halve(next.unit);
+			const value = await run(next.unit, next.budget, halves === null ? shorter : null);
+			if (value === TRUNCATED) queue.unshift(...(halves ?? []).map((unit) => ({ unit, budget: next.budget })));
+			else apply(value);
 		}
 	};
 
-	const stage = await generate(buildTasksPrompt(state, input), "plan_tasks", TASKS_SCHEMA, "tasks", (raw) =>
-		checkTasks(state, goal, raw),
+	// Extraction: the curriculum the sources recommend. Uncapped plans read the context as one more source.
+	const context = input.context.trim();
+	const sources: readonly PlannerSource[] = [
+		...input.sources,
+		...(input.uncapped && context !== "" ? [{ url: "context", title: "Context", text: context }] : []),
+	];
+	const found: CurriculumItem[] = [];
+	for (const source of sources) {
+		await inOrder(
+			chunkText(source.text, MAX_CHUNK),
+			halveChunk,
+			"one short sentence per note",
+			(chunk, budget, shorter) =>
+				generate(
+					buildExtractPrompt(source, chunk),
+					"plan_extract",
+					EXTRACT_SCHEMA,
+					(raw) => checkExtract(source.url, raw),
+					budget,
+					shorter,
+				),
+			(items) => found.push(...items),
+		);
+	}
+	const curriculum = mergeItems(found);
+
+	// Stage A. An uncapped curriculum is planned a few items per request; anything else in one request.
+	let summary = "";
+	const tasks: DraftTask[] = [];
+	const addTasks = (reply: TasksReply) => {
+		if (reply.summary !== null) summary = reply.summary;
+		tasks.push(...reply.tasks);
+	};
+	if (input.uncapped && curriculum.length > 0) {
+		const batches = Array.from({ length: Math.ceil(curriculum.length / ITEMS_PER_REQUEST) }, (_, n) => ({
+			first: n * ITEMS_PER_REQUEST,
+			count: Math.min(ITEMS_PER_REQUEST, curriculum.length - n * ITEMS_PER_REQUEST),
+		}));
+		await inOrder(
+			batches,
+			({ first, count }) => {
+				const half = Math.floor(count / 2);
+				return count < 2
+					? null
+					: [
+							{ first, count: half },
+							{ first: first + half, count: count - half },
+						];
+			},
+			"one sentence per text field",
+			({ first, count }, budget, shorter) => {
+				const items = Array.from({ length: count }, (_, i) => first + i + 1);
+				const schema = tasksSchema({
+					minTasks: count,
+					maxTasks: count * TASKS_PER_ITEM,
+					firstIndex: tasks.length,
+					maxMinutes: MAX_UNCAPPED_TASK_MINUTES,
+					summary: tasks.length === 0,
+					items,
+				});
+				return generate(
+					buildTasksPrompt(state, input, curriculum, { first, count, planned: tasks }),
+					"plan_tasks",
+					schema,
+					(raw) => checkTasks(state, goal, raw, schema, tasks, items),
+					budget,
+					shorter,
+				);
+			},
+			addTasks,
+		);
+	} else {
+		const schema = tasksSchema({
+			minTasks: 3,
+			maxTasks: input.uncapped ? null : MAX_TASKS,
+			firstIndex: 0,
+			maxMinutes: input.uncapped ? MAX_UNCAPPED_TASK_MINUTES : MAX_TASK_MINUTES,
+			summary: true,
+			items: null,
+		});
+		await inOrder(
+			[null],
+			() => null,
+			input.uncapped
+				? "fewer, larger tasks, one sentence per text field"
+				: "at most 8 tasks, one sentence per text field",
+			(_, budget, shorter) =>
+				generate(
+					buildTasksPrompt(state, input, curriculum),
+					"plan_tasks",
+					schema,
+					(raw) => checkTasks(state, goal, raw, schema, [], null),
+					budget,
+					shorter,
+				),
+			addTasks,
+		);
+	}
+	const stage: TasksStage = { goal, summary, tasks };
+
+	// Stage B. Uncapped plans ask in batches of tasks; later batches see the skills defined so far.
+	const defined = new Map<SkillKey, DraftSkill>();
+	const requires = new Map<number, Links>();
+	const develops = new Map<number, Links>();
+	const indices = tasks.map((_, i) => i);
+	const batchSize = input.uncapped ? TASKS_PER_SKILLS_REQUEST : indices.length;
+	const batches = Array.from({ length: Math.ceil(indices.length / batchSize) }, (_, n) =>
+		indices.slice(n * batchSize, (n + 1) * batchSize),
 	);
-	const draft = await generate(
-		buildSkillsPrompt(stage.goal, stage.tasks),
-		"plan_skills",
-		skillsSchema(stage.tasks.length),
-		"skills",
-		(raw) => checkSkills(state, stage, raw),
+	const maxSkills = input.uncapped ? null : MAX_SKILLS;
+	await inOrder(
+		batches,
+		(batch) => {
+			const half = Math.floor(batch.length / 2);
+			return input.uncapped && batch.length > 1 ? [batch.slice(0, half), batch.slice(half)] : null;
+		},
+		"at most 8 skills, one sentence per text field",
+		(batch, budget, shorter) =>
+			generate(
+				buildSkillsPrompt(
+					goal,
+					batch.map((index) => ({ index, title: tasks[index]?.title ?? "", doneWhen: tasks[index]?.doneWhen ?? "" })),
+					[...defined.values()].map(({ key, name }) => ({ key, name })),
+				),
+				"plan_skills",
+				skillsSchema(batch, maxSkills),
+				(raw) => checkSkills(state, stage, batch, maxSkills, { defined, requires, develops }, raw),
+				budget,
+				shorter,
+			),
+		(reply) => {
+			// Merged by key: the first definition keeps its fields, links accumulate.
+			for (const skill of reply.skills) if (!defined.has(skill.key)) defined.set(skill.key, skill);
+			for (const [task, links] of reply.requires) requires.set(task, links);
+			for (const [task, links] of reply.develops) develops.set(task, links);
+		},
 	);
-	// Final gate: both stages passed, so this only fails if assembly itself is wrong.
+	const draft: PlanDraft = {
+		goal,
+		summary,
+		skills: [...defined.values()].filter((skill) => !Object.hasOwn(state.skills, skill.key)),
+		tasks: tasks.map((task, i) => withLinks(task, requires.get(i), develops.get(i))),
+	};
+	// Final gate: every request passed, so this only fails if assembly itself is wrong.
 	const errors = validateDraft(state, draft);
 	if (errors.length > 0) throw new PlannerError(errors, attempts);
 	const deduped = await dedupeSkills(model, state, draft, options.signal);
@@ -177,10 +393,40 @@ function parse(raw: string): { readonly ok: true; readonly value: unknown } | Ch
 	}
 }
 
-/** Stage A: tasks get refs `t1..tn`; `after` keeps only earlier indices, so dependencies are always a DAG. */
-function checkTasks(state: KernelState, goal: string, raw: string): Checked<TasksStage> {
+/** Extraction: the resources of one chunk, tagged with their source. Items without a title are dropped. */
+function checkExtract(source: string, raw: string): Checked<readonly CurriculumItem[]> {
 	const parsed = parse(raw);
 	if (!parsed.ok) return parsed;
+	const value = trimDeep(parsed.value);
+	if (isRecord(value) && Array.isArray(value.items)) {
+		const items = value.items.filter((item) => !isRecord(item) || item.title !== "");
+		for (const item of items) {
+			if (isRecord(item) && typeof item.kind === "string") item.kind = item.kind.toLowerCase();
+		}
+		value.items = items;
+	}
+	if (!Value.Check(EXTRACT_SCHEMA, value)) {
+		return { ok: false, shown: JSON.stringify(value), errors: schemaErrors(EXTRACT_SCHEMA, value) };
+	}
+	return { ok: true, value: value.items.map((item) => ({ source, ...item })) };
+}
+
+/**
+ * Stage A: the reply's tasks continue `planned` with refs `t<n+1>` for global index n; `after` keeps
+ * only earlier indices, so dependencies are always a DAG. `items`: curriculum item numbers that
+ * each need a task, or null.
+ */
+function checkTasks(
+	state: KernelState,
+	goal: string,
+	raw: string,
+	schema: TSchema,
+	planned: readonly DraftTask[],
+	items: readonly number[] | null,
+): Checked<TasksReply> {
+	const parsed = parse(raw);
+	if (!parsed.ok) return parsed;
+	const first = planned.length;
 	const value = trimDeep(parsed.value);
 	if (isRecord(value) && Array.isArray(value.tasks)) {
 		value.tasks.forEach((task, i) => {
@@ -189,17 +435,39 @@ function checkTasks(state: KernelState, goal: string, raw: string): Checked<Task
 			// Categories key the estimate reference classes: "Data Processing" and "data processing" are one class.
 			if (typeof task.category === "string") task.category = task.category.toLowerCase();
 			if (Array.isArray(task.after)) {
-				task.after = [...new Set(task.after)].filter((a) => Number.isInteger(a) && a >= 0 && a < i);
+				task.after = [...new Set(task.after)].filter((a) => Number.isInteger(a) && a >= 0 && a < first + i);
 			}
 		});
 	}
 	const shown = JSON.stringify(value);
-	if (!Value.Check(TASKS_SCHEMA, value)) return { ok: false, shown, errors: schemaErrors(TASKS_SCHEMA, value) };
-	const stage: TasksStage = {
-		goal,
-		summary: value.summary,
-		tasks: value.tasks.map((t, i) => ({
-			ref: `t${i + 1}`,
+	if (!Value.Check(schema, value)) return { ok: false, shown, errors: schemaErrors(schema, value) };
+	const reply = value as {
+		readonly summary?: string;
+		readonly tasks: readonly {
+			readonly item?: number;
+			readonly title: string;
+			readonly doneWhen: string;
+			readonly notes: string;
+			readonly category: string;
+			readonly estimateMinutes: number;
+			readonly importance: number;
+			readonly urgency: number;
+			readonly after: readonly number[];
+		}[];
+	};
+	const missing = (items ?? []).filter((n) => !reply.tasks.some((t) => t.item === n));
+	if (missing.length > 0) {
+		return {
+			ok: false,
+			shown,
+			errors: [
+				`curriculum items ${missing.join(", ")} have no task; legal: at least one task per item, with item set to its number`,
+			],
+		};
+	}
+	const tasks = reply.tasks.map(
+		(t, i): DraftTask => ({
+			ref: `t${first + i + 1}`,
 			title: t.title,
 			notes: t.notes,
 			doneWhen: t.doneWhen,
@@ -210,58 +478,100 @@ function checkTasks(state: KernelState, goal: string, raw: string): Checked<Task
 			urgency: t.urgency as Likert,
 			requires: [],
 			after: t.after.map((a) => `t${a + 1}`),
-		})),
-	};
-	const errors = validateDraft(state, { ...stage, skills: [] });
-	return errors.length === 0 ? { ok: true, value: stage } : { ok: false, shown, errors };
+		}),
+	);
+	const summary = reply.summary ?? null;
+	const errors = validateDraft(state, { goal, summary: summary ?? "", skills: [], tasks: [...planned, ...tasks] })
+		// The reply numbers its own tasks from 0.
+		.map((error) => error.replace(/^tasks\[(\d+)\]/, (_, n: string) => `tasks[${Number(n) - first}]`));
+	return errors.length === 0 ? { ok: true, value: { summary, tasks } } : { ok: false, shown, errors };
 }
 
 /**
- * Stage B: skills with the task indices that need them. Requirements are derived from `neededBy`
- * (highest level per task and skill). An entry whose key exactly matches a known skill reuses it: it is
- * filled from state for validation and left out of the draft. Prerequisites are hints: unknown keys are dropped.
+ * Stage B: skills with the indices of the tasks (`batch`) that need or develop them. Requirements
+ * come from `neededBy`, `develops` from `developedBy` (highest level per task and skill). An entry whose
+ * key exactly matches a known skill reuses it: it is filled from state for validation and left out of
+ * the draft. Skills linked to no task are dropped. Prerequisites are hints: unknown keys are dropped.
+ * `earlier`: what previous batches produced.
  */
-function checkSkills(state: KernelState, stage: TasksStage, raw: string): Checked<PlanDraft> {
+function checkSkills(
+	state: KernelState,
+	stage: TasksStage,
+	batch: readonly number[],
+	maxSkills: number | null,
+	earlier: {
+		readonly defined: ReadonlyMap<SkillKey, DraftSkill>;
+		readonly requires: ReadonlyMap<number, Links>;
+		readonly develops: ReadonlyMap<number, Links>;
+	},
+	raw: string,
+): Checked<SkillsReply> {
 	const parsed = parse(raw);
 	if (!parsed.ok) return parsed;
 	const value = trimDeep(parsed.value);
-	const entries = isRecord(value) && Array.isArray(value.skills) ? value.skills.filter(isRecord) : [];
+	let entries = isRecord(value) && Array.isArray(value.skills) ? value.skills.filter(isRecord) : [];
+	const unlinked = (skill: Record<string, unknown>) =>
+		Array.isArray(skill.neededBy) &&
+		skill.neededBy.length === 0 &&
+		Array.isArray(skill.developedBy) &&
+		skill.developedBy.length === 0;
+	// A skill linked to no task cannot change the plan: it is dropped before prerequisites are resolved, so
+	// references to it go too. A reply with no linked skill at all missed the links and is repaired instead.
+	if (isRecord(value) && Array.isArray(value.skills) && entries.some((skill) => !unlinked(skill))) {
+		value.skills = value.skills.filter((skill) => !isRecord(skill) || !unlinked(skill));
+		entries = entries.filter((skill) => !unlinked(skill));
+	}
 	for (const skill of entries) normalizeSkill(skill);
-	const known = new Set([...entries.map((s) => s.key), ...Object.keys(state.skills)]);
+	const known = new Set([...entries.map((s) => s.key), ...earlier.defined.keys(), ...Object.keys(state.skills)]);
 	for (const skill of entries) {
 		if (Array.isArray(skill.prerequisites)) {
 			skill.prerequisites = skill.prerequisites.filter((key) => key !== skill.key && known.has(key));
 		}
 	}
 	const shown = JSON.stringify(value);
-	const schema = skillsSchema(stage.tasks.length);
+	const schema = skillsSchema(batch, maxSkills);
 	if (!Value.Check(schema, value)) return { ok: false, shown, errors: schemaErrors(schema, value) };
+	const missing = value.skills.flatMap((skill, i) =>
+		skill.neededBy.length === 0 && skill.developedBy.length === 0
+			? [`skills[${i}] has empty neededBy and developedBy; legal: at least one task in either`]
+			: [],
+	);
+	if (missing.length > 0) return { ok: false, shown, errors: missing };
 
-	const requires = stage.tasks.map(() => new Map<SkillKey, TargetLevel>());
-	const skills: DraftSkill[] = value.skills.map(({ neededBy, ...skill }) => {
-		for (const { task, level } of neededBy) {
-			const needs = requires[task];
-			// The schema's enums bound `task` to the task indices and `level` to 1..5.
-			if (needs !== undefined && level > (needs.get(skill.key) ?? 0)) needs.set(skill.key, level as TargetLevel);
-		}
+	const requires = new Map(batch.map((i): [number, Links] => [i, new Map()]));
+	const develops = new Map(batch.map((i): [number, Links] => [i, new Map()]));
+	const link = (links: ReadonlyMap<number, Links>, key: SkillKey, task: number, level: number) => {
+		const own = links.get(task);
+		// The schema's enums bound `task` to the batch's indices and `level` to 1..5.
+		if (own !== undefined && level > (own.get(key) ?? 0)) own.set(key, level as TargetLevel);
+	};
+	const skills: DraftSkill[] = value.skills.map(({ neededBy, developedBy, ...skill }) => {
+		for (const { task, level } of neededBy) link(requires, skill.key, task, level);
+		for (const { task, level } of developedBy) link(develops, skill.key, task, level);
 		const existing = state.skills[skill.key];
 		if (existing === undefined) return skill;
 		const { key, name, description, concepts, prerequisites, resources, retrievalPrompts, practiceMinutes } = existing;
 		return { key, name, description, concepts, prerequisites, resources, retrievalPrompts, practiceMinutes };
 	});
-	const tasks = stage.tasks.map((task, i) => ({
-		...task,
-		requires: [...(requires[i] ?? [])].map(([skill, level]): Requirement => ({ skill, level })),
-	}));
-	const errors = validateDraft(state, { goal: stage.goal, summary: stage.summary, skills, tasks });
-	if (errors.length > 0) return { ok: false, shown, errors };
-	const draft: PlanDraft = {
+	// Validated as the plan so far: this reply's skills first, so `skills[i]` paths match the reply.
+	const keys = new Set(skills.map((skill) => skill.key));
+	const errors = validateDraft(state, {
 		goal: stage.goal,
 		summary: stage.summary,
-		skills: skills.filter((skill) => !Object.hasOwn(state.skills, skill.key)),
-		tasks,
-	};
-	return { ok: true, value: draft };
+		skills: [...skills, ...[...earlier.defined.values()].filter((skill) => !keys.has(skill.key))],
+		tasks: stage.tasks.map((task, i) =>
+			withLinks(task, requires.get(i) ?? earlier.requires.get(i), develops.get(i) ?? earlier.develops.get(i)),
+		),
+	});
+	return errors.length === 0 ? { ok: true, value: { skills, requires, develops } } : { ok: false, shown, errors };
+}
+
+/** `task` with its skill links; `develops` is left out when empty. */
+function withLinks(task: DraftTask, requires: Links | undefined, develops: Links | undefined): DraftTask {
+	const toRequirements = (links: Links | undefined) =>
+		[...(links ?? [])].map(([skill, level]): Requirement => ({ skill, level }));
+	const developed = toRequirements(develops);
+	return { ...task, requires: toRequirements(requires), ...(developed.length > 0 ? { develops: developed } : {}) };
 }
 
 /** Schema violations as `path = value: message`, in the same path style as core `validateDraft`. */

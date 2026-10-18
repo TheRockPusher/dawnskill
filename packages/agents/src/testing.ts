@@ -3,11 +3,12 @@ import type { PlanDraft } from "@dawnskill/core";
 import type { ChatProvider, JsonRequest } from "./provider.ts";
 
 /**
- * The two planner replies (tasks stage, skills stage) for `draft`. `planGoal` returns `draft` when it
- * has 3–12 tasks with refs `t1..tn`, `after` names earlier tasks, every draft skill is required by some
- * task and has 2+ concepts and 2–4 retrieval prompts, and each `requires` lists draft skills in draft
- * order before existing ones. A required key that is not a draft skill becomes a minimal reuse entry,
- * so it must exist in state.
+ * The two planner replies (tasks stage, skills stage) of a single-request plan for `draft`. `planGoal`
+ * returns `draft` when it has 3–12 tasks (any number ≥ 3 uncapped, without a curriculum) with refs
+ * `t1..tn`, `after` names earlier tasks, every draft skill is required or developed by some task and has
+ * 2+ concepts and 2–4 retrieval prompts, and each `requires`/`develops` lists draft skills in draft
+ * order before existing ones. A linked key that is not a draft skill becomes a minimal reuse entry, so
+ * it must exist in state.
  */
 export function planResponses(draft: PlanDraft): [tasks: string, skills: string] {
 	const index = new Map(draft.tasks.map((task, i) => [task.ref, i]));
@@ -21,16 +22,20 @@ export function planResponses(draft: PlanDraft): [tasks: string, skills: string]
 		urgency: t.urgency,
 		after: t.after.map((ref) => index.get(ref)),
 	}));
-	const neededBy = (key: string) =>
+	const linked = (key: string, field: "requires" | "develops") =>
 		draft.tasks.flatMap((task, i) =>
-			task.requires.filter((r) => r.skill === key).map((r) => ({ task: i, level: r.level })),
+			(task[field] ?? []).filter((r) => r.skill === key).map((r) => ({ task: i, level: r.level })),
 		);
 	const drafted = new Set(draft.skills.map((skill) => skill.key));
-	const reused = [...new Set(draft.tasks.flatMap((task) => task.requires.map((r) => r.skill)))].filter(
-		(key) => !drafted.has(key),
-	);
+	const reused = [
+		...new Set(draft.tasks.flatMap((task) => [...task.requires, ...(task.develops ?? [])].map((r) => r.skill))),
+	].filter((key) => !drafted.has(key));
 	const skills = [
-		...draft.skills.map((skill) => ({ ...skill, neededBy: neededBy(skill.key) })),
+		...draft.skills.map((skill) => ({
+			...skill,
+			neededBy: linked(skill.key, "requires"),
+			developedBy: linked(skill.key, "develops"),
+		})),
 		...reused.map((key) => ({
 			key,
 			name: key,
@@ -40,10 +45,34 @@ export function planResponses(draft: PlanDraft): [tasks: string, skills: string]
 			practiceMinutes: 60,
 			prerequisites: [],
 			resources: [],
-			neededBy: neededBy(key),
+			neededBy: linked(key, "requires"),
+			developedBy: linked(key, "develops"),
 		})),
 	];
 	return [JSON.stringify({ summary: draft.summary, tasks }), JSON.stringify({ skills })];
+}
+
+/** An extraction reply listing `items`; absent fields are empty, `kind` defaults to book. */
+export function extractResponse(
+	items: readonly {
+		readonly title: string;
+		readonly section?: string;
+		readonly creator?: string;
+		readonly kind?: string;
+		readonly level?: string;
+		readonly note?: string;
+	}[],
+): string {
+	return JSON.stringify({
+		items: items.map((item) => ({
+			section: item.section ?? "",
+			title: item.title,
+			creator: item.creator ?? "",
+			kind: item.kind ?? "book",
+			level: item.level ?? "",
+			note: item.note ?? "",
+		})),
+	});
 }
 
 /**

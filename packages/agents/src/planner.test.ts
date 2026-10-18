@@ -1,7 +1,8 @@
 import { fc, test } from "@fast-check/vitest";
-import { initialState, type KernelState, type PlanDraft, type Skill } from "@dawnskill/core";
-import { describe, expect, it } from "vitest";
+import { type DraftTask, initialState, type KernelState, type PlanDraft, type Skill } from "@dawnskill/core";
+import { describe, expect, it, vi } from "vitest";
 import { PlannerError, type PlannerStreamEvent, planGoal } from "./planner.ts";
+import type { PlannerInput, PlannerSource } from "./prompt.ts";
 import {
 	ContextSizeError,
 	llmConfigFromEnv,
@@ -9,10 +10,15 @@ import {
 	type ReplyDelta,
 	TruncatedReplyError,
 } from "./provider.ts";
-import { planResponses, scriptedProvider } from "./testing.ts";
+import { extractResponse, planResponses, scriptedProvider } from "./testing.ts";
 
 const AT = "2026-10-16T09:30:00.000Z";
-const INPUT = { goal: "Contribute a bug fix to ripgrep", context: "I write Python daily." };
+const INPUT: PlannerInput = {
+	goal: "Contribute a bug fix to ripgrep",
+	context: "I write Python daily.",
+	sources: [],
+	uncapped: false,
+};
 
 const OWNERSHIP = {
 	key: "rust-ownership-borrowing",
@@ -79,9 +85,9 @@ function tasksWith(index: number, patch: Record<string, unknown>): string {
 	return JSON.stringify({ ...reply, tasks: reply.tasks.map((t, i) => (i === index ? { ...t, ...patch } : t)) });
 }
 
-/** Stage B reply from skill entries (`neededBy` included). */
+/** Stage B reply from skill entries (`neededBy` included; `developedBy` empty unless given). */
 function skillsReply(...skills: readonly Record<string, unknown>[]): string {
-	return JSON.stringify({ skills });
+	return JSON.stringify({ skills: skills.map((skill) => ({ developedBy: [], ...skill })) });
 }
 
 const OWNERSHIP_ENTRY = { ...OWNERSHIP, neededBy: [{ task: 1, level: 2 }] };
@@ -126,7 +132,7 @@ describe("planGoal", () => {
 	it("keeps the user's goal, trimmed and cut to 200 chars; the tasks schema has no goal", async () => {
 		const long = `  ${"Contribute a bug fix to ripgrep ".repeat(10)}`;
 		const provider = scriptedProvider([TASKS, SKILLS]);
-		const { draft } = await planGoal(provider, initialState(), { goal: long, context: "" });
+		const { draft } = await planGoal(provider, initialState(), { ...INPUT, goal: long, context: "" });
 		expect(draft.goal).toBe(long.trim().slice(0, 200));
 		expect(provider.calls[0]?.schema).not.toHaveProperty("properties.goal");
 		expect(provider.calls[1]?.user).toContain(`Goal: ${long.trim().slice(0, 200)}\n`);
@@ -142,7 +148,7 @@ describe("planGoal", () => {
 
 	it("refuses an empty goal without calling the model", async () => {
 		const provider = scriptedProvider([]);
-		await expect(planGoal(provider, initialState(), { goal: "  ", context: "" })).rejects.toThrow("goal is empty");
+		await expect(planGoal(provider, initialState(), { ...INPUT, goal: "  " })).rejects.toThrow("goal is empty");
 		expect(provider.calls).toHaveLength(0);
 	});
 
@@ -221,27 +227,28 @@ describe("planGoal", () => {
 		]);
 	});
 
-	it("repairs each stage with only that stage's output and errors", async () => {
+	it("repairs each stage with its original request, that stage's output and errors", async () => {
 		const badTasks = tasksWith(0, { importance: 9 });
 		const badSkills = skillsReply({ ...OWNERSHIP_ENTRY, neededBy: [{ task: 3, level: 2 }] }, OWNERSHIP_ENTRY);
 		const provider = scriptedProvider([badTasks, TASKS, badSkills, SKILLS]);
 		const result = await planGoal(provider, initialState(), INPUT);
 		expect(result).toEqual({ draft: VALID, attempts: 4, remapped: {} });
 		provider.assertDone();
+		const [tasksFirst, tasksRepair, skillsFirst, skillsRepair] = provider.calls;
 
-		const tasksRepair = provider.calls[1];
 		expect(tasksRepair?.schemaName).toBe("plan_tasks");
+		expect(tasksRepair?.user).toContain(`${tasksFirst?.user}\n\nYour previous answer:\n`);
 		expect(tasksRepair?.user).toContain("1. tasks[0].importance = 9: must be <= 5");
 		expect(tasksRepair?.user).toContain('"importance":9');
 		expect(tasksRepair?.user).toContain("return the corrected JSON");
-		expect(tasksRepair?.user).not.toContain("Context:");
 
-		const skillsRepair = provider.calls[3];
 		expect(skillsRepair?.schemaName).toBe("plan_skills");
+		expect(skillsRepair?.user).toContain(`${skillsFirst?.user}\n\nYour previous answer:\n`);
+		expect(skillsRepair?.user).toContain("0. Pick a good-first-issue; done when: Issue assigned to me");
 		expect(skillsRepair?.user).toContain(
 			"1. skills[0].neededBy[0].task = 3: must be equal to one of the allowed values",
 		);
-		expect(skillsRepair?.user).not.toContain("done when:");
+		expect(skillsRepair?.user).not.toContain("importance");
 	});
 
 	it("reports kernel validation errors of the skills stage by path and value", async () => {
@@ -355,7 +362,8 @@ describe("planGoal", () => {
 						properties: {
 							concepts: { minItems: 2 },
 							retrievalPrompts: { minItems: 2, maxItems: 4 },
-							neededBy: { minItems: 1, maxItems: 3 },
+							neededBy: { minItems: 0, maxItems: 3 },
+							developedBy: { minItems: 0, maxItems: 3 },
 						},
 					},
 				},
@@ -363,10 +371,10 @@ describe("planGoal", () => {
 		});
 	});
 
-	it("repairs too few tasks, concepts, prompts and needing tasks", async () => {
+	it("repairs too few tasks, concepts and prompts", async () => {
 		const reply = JSON.parse(TASKS) as { summary: string; tasks: unknown[] };
 		const oneTask = JSON.stringify({ ...reply, tasks: reply.tasks.slice(0, 1) });
-		const thin = skillsReply({ ...OWNERSHIP_ENTRY, concepts: ["one"], retrievalPrompts: ["one?"], neededBy: [] });
+		const thin = skillsReply({ ...OWNERSHIP_ENTRY, concepts: ["one"], retrievalPrompts: ["one?"] });
 		const provider = scriptedProvider([oneTask, TASKS, thin, SKILLS]);
 		const result = await planGoal(provider, initialState(), INPUT);
 		expect(result.attempts).toBe(4);
@@ -374,7 +382,6 @@ describe("planGoal", () => {
 		const repair = provider.calls[3]?.user ?? "";
 		expect(repair).toContain("skills[0].concepts = array(1): must not have fewer than 2 items");
 		expect(repair).toContain("skills[0].retrievalPrompts = array(1): must not have fewer than 2 items");
-		expect(repair).toContain("skills[0].neededBy = array(0): must not have fewer than 1 items");
 	});
 
 	it("keeps a context-size failure fatal: no repair, a clear PlannerError", async () => {
@@ -396,7 +403,7 @@ describe("planGoal", () => {
 
 	it("retries a truncated stage reply with the original request and a shorter-reply note", async () => {
 		const truncated = () => {
-			throw new TruncatedReplyError(4096);
+			throw new TruncatedReplyError(4096, false);
 		};
 		const provider = scriptedProvider([truncated, TASKS, truncated, SKILLS]);
 		const result = await planGoal(provider, initialState(), INPUT);
@@ -413,7 +420,7 @@ describe("planGoal", () => {
 
 	it("fails with the truncation message when every attempt is cut off", async () => {
 		const truncated = () => {
-			throw new TruncatedReplyError(4096);
+			throw new TruncatedReplyError(4096, false);
 		};
 		const provider = scriptedProvider([truncated, truncated, truncated]);
 		await expect(planGoal(provider, initialState(), INPUT)).rejects.toMatchObject({
@@ -421,6 +428,464 @@ describe("planGoal", () => {
 			errors: ["reply truncated at max_tokens 4096"],
 		});
 		provider.assertDone();
+	});
+});
+
+describe("skill links", () => {
+	it("derives develops from developedBy, keeping the highest level per task, and leaves it out when empty", async () => {
+		const codebase = { ...OWNERSHIP, key: "ripgrep-codebase", name: "ripgrep: codebase layout" };
+		const skills = skillsReply(OWNERSHIP_ENTRY, {
+			...codebase,
+			neededBy: [],
+			developedBy: [
+				{ task: 0, level: 1 },
+				{ task: 0, level: 2 },
+				{ task: 2, level: 1 },
+			],
+		});
+		const { draft } = await planGoal(scriptedProvider([TASKS, skills]), initialState(), INPUT);
+		expect(draft.skills.map((s) => s.key)).toEqual([OWNERSHIP.key, "ripgrep-codebase"]);
+		expect(draft.tasks[0]?.develops).toEqual([{ skill: "ripgrep-codebase", level: 2 }]);
+		expect(draft.tasks[1]).not.toHaveProperty("develops");
+		expect(draft.tasks[1]?.requires).toEqual([{ skill: OWNERSHIP.key, level: 2 }]);
+		expect(draft.tasks[2]?.develops).toEqual([{ skill: "ripgrep-codebase", level: 1 }]);
+	});
+
+	it("drops a skill linked to no task, and prerequisites naming it, without a repair", async () => {
+		const orphan = { ...OWNERSHIP, key: "ripgrep-codebase", name: "ripgrep: codebase layout", neededBy: [] };
+		const skills = skillsReply({ ...OWNERSHIP_ENTRY, prerequisites: ["ripgrep-codebase"] }, orphan);
+		const provider = scriptedProvider([TASKS, skills]);
+		const result = await planGoal(provider, initialState(), INPUT);
+		provider.assertDone();
+		expect(result).toEqual({ draft: VALID, attempts: 2, remapped: {} });
+	});
+
+	it("repairs a reply in which no skill is linked to a task", async () => {
+		const orphan = { ...OWNERSHIP, key: "ripgrep-codebase", name: "ripgrep: codebase layout", neededBy: [] };
+		const provider = scriptedProvider([TASKS, skillsReply({ ...OWNERSHIP_ENTRY, neededBy: [] }, orphan), SKILLS]);
+		const result = await planGoal(provider, initialState(), INPUT);
+		expect(result).toEqual({ draft: VALID, attempts: 3, remapped: {} });
+		const repair = provider.calls[2]?.user ?? "";
+		expect(repair).toContain("1. skills[0] has empty neededBy and developedBy; legal: at least one task in either");
+		expect(repair).toContain("2. skills[1] has empty neededBy and developedBy; legal: at least one task in either");
+	});
+});
+
+describe("curriculum planning", () => {
+	const PHYSICS: PlannerSource = {
+		url: "https://www.susanrigetti.com/physics",
+		title: "So You Want to Learn Physics",
+		text: "# So You Want to Learn Physics\n\n## Calculus\n\n- Calculus: Early Transcendentals by James Stewart\n\n## Mechanics\n\n- Classical Mechanics by John R. Taylor",
+	};
+	const MATH: PlannerSource = {
+		url: "https://www.susanrigetti.com/math",
+		title: "So You Want to Learn Math",
+		text: "# Math\n\n## Proofs\n\n- How to Prove It by Daniel J. Velleman",
+	};
+	const truncated = () => {
+		throw new TruncatedReplyError(4096, false);
+	};
+
+	function uncapped(sources: readonly PlannerSource[]): PlannerInput {
+		return { goal: "Learn math, physics and philosophy", context: "", sources, uncapped: true };
+	}
+
+	/** A stage A study task; `item` names its curriculum item in batch replies. */
+	function study(title: string, fields: Record<string, unknown> = {}) {
+		return {
+			title,
+			doneWhen: "Every assigned exercise solved and checked",
+			notes: "",
+			category: "reading",
+			estimateMinutes: 6000,
+			importance: 4,
+			urgency: 2,
+			after: [],
+			...fields,
+		};
+	}
+
+	/** A stage B skill entry with its task links. */
+	function skill(key: string, links: Record<string, unknown>) {
+		return {
+			key,
+			name: `Study: ${key}`,
+			description: `${key} at undergraduate level.`,
+			concepts: ["definitions", "worked problems"],
+			retrievalPrompts: [`State the central theorem of ${key}.`, `Solve a standard ${key} problem.`],
+			practiceMinutes: 240,
+			prerequisites: [],
+			resources: [],
+			neededBy: [],
+			developedBy: [],
+			...links,
+		};
+	}
+
+	it("plans a supplied curriculum in full: batches of items, tasks in item order, each developing its subject", async () => {
+		const physics = [
+			{ section: "Calculus", title: "Calculus: Early Transcendentals", creator: "James Stewart" },
+			{ section: "Calculus", title: "Div, Grad, Curl, and All That", creator: "H. M. Schey" },
+			{ section: "Mechanics", title: "Classical Mechanics", creator: "John R. Taylor" },
+			{ section: "Electromagnetism", title: "Introduction to Electrodynamics", creator: "David J. Griffiths" },
+			{
+				section: "Quantum Mechanics",
+				title: "Introduction to Quantum Mechanics",
+				creator: "David J. Griffiths",
+				note: "Solutions manual available; do every problem.",
+			},
+			{ section: "Thermodynamics", title: "An Introduction to Thermal Physics", creator: "Daniel V. Schroeder" },
+		];
+		const math = [
+			{ section: "Calculus", title: "calculus – early transcendentals", creator: "James  Stewart" },
+			{ section: "Proofs", title: "How to Prove It", creator: "Daniel J. Velleman" },
+			{ section: "Linear Algebra", title: "Linear Algebra Done Right", creator: "Sheldon Axler" },
+			{ section: "Analysis", title: "Principles of Mathematical Analysis", creator: "Walter Rudin" },
+			{ section: "Algebra", title: "Abstract Algebra", creator: "David S. Dummit, Richard M. Foote" },
+		];
+		const first = JSON.stringify({
+			summary: "Works through both reading lists in order, one book at a time.",
+			tasks: [
+				study("Read Stewart, Calculus: Early Transcendentals, and solve the odd exercises", { item: 1 }),
+				study("Read Schey, Div, Grad, Curl, and All That, and solve its problems", { item: 2, after: [0] }),
+				study("Read Taylor, Classical Mechanics, and solve the end-of-chapter problems", { item: 3, after: [0] }),
+				study("Read Griffiths, Introduction to Electrodynamics, and solve its problems", { item: 4, after: [1, 2] }),
+				study("Read Griffiths, Introduction to Quantum Mechanics, and solve every problem", { item: 5, after: [3] }),
+				study("Read Schroeder, An Introduction to Thermal Physics, and solve its problems", { item: 6, after: [2] }),
+				study("Read Velleman, How to Prove It, and write out every exercise proof", {
+					item: 7,
+					category: "problem-solving",
+				}),
+				study("Read Axler, Linear Algebra Done Right, and solve its exercises", { item: 8, after: [6] }),
+			],
+		});
+		const second = JSON.stringify({
+			tasks: [
+				study("Read Rudin, Principles of Mathematical Analysis, ch. 1–7, and solve the exercises", {
+					item: 9,
+					after: [6],
+				}),
+				study("Write a complete proof of the Heine–Borel theorem from Rudin ch. 2", {
+					item: 9,
+					category: "writing",
+					estimateMinutes: 240,
+					after: [8],
+				}),
+				study("Read Dummit & Foote, Abstract Algebra, part I, and solve the exercises", { item: 10, after: [6, 7] }),
+			],
+		});
+		// Skills are asked per 8 tasks: tasks 0–7, then 8–10.
+		const skillsFirst = JSON.stringify({
+			skills: [
+				skill("single-variable-calculus", { developedBy: [{ task: 0, level: 2 }] }),
+				skill("vector-calculus", { developedBy: [{ task: 1, level: 2 }] }),
+				skill("classical-mechanics", { developedBy: [{ task: 2, level: 2 }] }),
+				skill("electrodynamics", { developedBy: [{ task: 3, level: 2 }] }),
+				skill("quantum-mechanics", { developedBy: [{ task: 4, level: 2 }] }),
+				skill("thermal-physics", { developedBy: [{ task: 5, level: 2 }] }),
+				skill("proof-writing", { developedBy: [{ task: 6, level: 2 }] }),
+				skill("linear-algebra", { developedBy: [{ task: 7, level: 2 }] }),
+			],
+		});
+		const skillsSecond = JSON.stringify({
+			skills: [
+				{ ...skill("proof-writing", { developedBy: [{ task: 9, level: 3 }] }), name: "Proofs: rigorous writing" },
+				skill("real-analysis", {
+					developedBy: [
+						{ task: 8, level: 2 },
+						{ task: 9, level: 2 },
+					],
+				}),
+				skill("abstract-algebra", { developedBy: [{ task: 10, level: 2 }] }),
+			],
+		});
+		const provider = scriptedProvider([
+			extractResponse(physics),
+			extractResponse(math),
+			first,
+			second,
+			skillsFirst,
+			skillsSecond,
+		]);
+		const events: PlannerStreamEvent[] = [];
+		const { draft, attempts } = await planGoal(provider, initialState(), uncapped([PHYSICS, MATH]), {
+			onStream: (event) => events.push(event),
+		});
+		provider.assertDone();
+		expect(attempts).toBe(6);
+		expect(events.flatMap((event) => (event.type === "request" ? [event.stage] : []))).toEqual([
+			"extract",
+			"extract",
+			"tasks",
+			"tasks",
+			"skills",
+			"skills",
+		]);
+		const laterSkills = provider.calls[5];
+		expect(laterSkills?.schema).toMatchObject({
+			properties: {
+				skills: { items: { properties: { developedBy: { items: { properties: { task: { enum: [8, 9, 10] } } } } } } },
+			},
+		});
+		expect(laterSkills?.user).toContain("proof-writing — Study: proof-writing");
+		expect(draft.skills.find((s) => s.key === "proof-writing")?.name).toBe("Study: proof-writing");
+
+		const [physicsPage, , firstBatch, secondBatch] = provider.calls;
+		expect(physicsPage?.user).toContain("## Mechanics\n\n- Classical Mechanics by John R. Taylor");
+		expect(firstBatch?.user).toContain(
+			"5. [www.susanrigetti.com] Quantum Mechanics — Introduction to Quantum Mechanics by David J. Griffiths (book) — Solutions manual available; do every problem.",
+		);
+		expect(firstBatch?.user).toContain(
+			"8. [www.susanrigetti.com] Linear Algebra — Linear Algebra Done Right by Sheldon Axler (book)",
+		);
+		expect(firstBatch?.user).not.toContain("calculus – early transcendentals");
+		expect(firstBatch?.user).not.toContain("Principles of Mathematical Analysis");
+		expect(secondBatch?.user).toContain("6. Read Velleman, How to Prove It, and write out every exercise proof");
+		expect(secondBatch?.user).toContain(
+			"9. [www.susanrigetti.com] Analysis — Principles of Mathematical Analysis by Walter Rudin (book)",
+		);
+		expect(secondBatch?.schema).toMatchObject({
+			properties: { tasks: { items: { properties: { item: { enum: [9, 10] } } } } },
+		});
+		expect(secondBatch?.schema).not.toHaveProperty("properties.summary");
+
+		expect(draft.summary).toBe("Works through both reading lists in order, one book at a time.");
+		expect(draft.tasks.map((t) => t.after)).toEqual([
+			[],
+			["t1"],
+			["t1"],
+			["t2", "t3"],
+			["t4"],
+			["t3"],
+			[],
+			["t7"],
+			["t7"],
+			["t9"],
+			["t7", "t8"],
+		]);
+		expect(draft.tasks.map((t) => t.develops)).toEqual([
+			[{ skill: "single-variable-calculus", level: 2 }],
+			[{ skill: "vector-calculus", level: 2 }],
+			[{ skill: "classical-mechanics", level: 2 }],
+			[{ skill: "electrodynamics", level: 2 }],
+			[{ skill: "quantum-mechanics", level: 2 }],
+			[{ skill: "thermal-physics", level: 2 }],
+			[{ skill: "proof-writing", level: 2 }],
+			[{ skill: "linear-algebra", level: 2 }],
+			[{ skill: "real-analysis", level: 2 }],
+			[
+				{ skill: "proof-writing", level: 3 },
+				{ skill: "real-analysis", level: 2 },
+			],
+			[{ skill: "abstract-algebra", level: 2 }],
+		]);
+		expect(draft.tasks.map((t) => t.requires)).toEqual(draft.tasks.map(() => []));
+		expect(draft.skills).toHaveLength(10);
+	});
+
+	it("plans a capped curriculum in one tasks request of at most 12, each resource listed once with its first source", async () => {
+		const other: PlannerSource = {
+			url: "https://math.example.org/list",
+			title: "",
+			text: "- CALCULUS: Early Transcendentals (Stewart)\n- How to Prove It (Velleman)",
+		};
+		const provider = scriptedProvider([
+			extractResponse([
+				{ section: "Calculus", title: "Calculus: Early Transcendentals", creator: "James Stewart" },
+				{ section: "Mechanics", title: "Classical Mechanics", creator: "John R. Taylor" },
+			]),
+			extractResponse([
+				{ title: "CALCULUS:  Early Transcendentals.", creator: "james stewart" },
+				{ section: "Proofs", title: "How to Prove It", creator: "Daniel J. Velleman" },
+			]),
+			TASKS,
+			SKILLS,
+		]);
+		const result = await planGoal(provider, initialState(), { ...INPUT, sources: [PHYSICS, other] });
+		provider.assertDone();
+		expect(result.draft).toEqual(VALID);
+		expect(provider.calls.map((call) => call.schemaName)).toEqual([
+			"plan_extract",
+			"plan_extract",
+			"plan_tasks",
+			"plan_skills",
+		]);
+		const tasks = provider.calls[2];
+		expect(tasks?.schema).toMatchObject({ properties: { tasks: { minItems: 3, maxItems: 12 } } });
+		expect(tasks?.schema).not.toHaveProperty("properties.tasks.items.properties.item");
+		expect(tasks?.user).toContain(
+			[
+				"1. [www.susanrigetti.com] Calculus — Calculus: Early Transcendentals by James Stewart (book)",
+				"2. [www.susanrigetti.com] Mechanics — Classical Mechanics by John R. Taylor (book)",
+				"3. [math.example.org] Proofs — How to Prove It by Daniel J. Velleman (book)",
+			].join("\n"),
+		);
+		expect(tasks?.user).not.toContain("CALCULUS");
+	});
+
+	it("plans an uncapped goal without a curriculum in one tasks request without a task cap", async () => {
+		const rounds = Array.from(
+			{ length: 10 },
+			(_, n): DraftTask => ({
+				ref: `t${n + 4}`,
+				title: `Address review round ${n + 1}`,
+				notes: "",
+				doneWhen: `Round ${n + 1} comments resolved`,
+				category: "coding",
+				estimateMinutes: 60,
+				importance: 3,
+				urgency: 3,
+				requires: [],
+				after: [`t${n + 3}`],
+			}),
+		);
+		const many: PlanDraft = { ...VALID, tasks: [...VALID.tasks, ...rounds] };
+		// 13 tasks: skills are asked for tasks 0–7, then 8–12 (which link to no skill).
+		const provider = scriptedProvider([extractResponse([]), ...planResponses(many), '{"skills": []}']);
+		const result = await planGoal(provider, initialState(), { ...INPUT, uncapped: true });
+		provider.assertDone();
+		expect(result.draft).toEqual(many);
+		const [context, tasks] = provider.calls;
+		expect(context?.schemaName).toBe("plan_extract");
+		expect(context?.user).toContain("I write Python daily.");
+		expect(tasks?.user).toContain("Context: I write Python daily.");
+		expect(tasks?.schema).not.toHaveProperty("properties.tasks.maxItems");
+	});
+
+	it("splits a truncated extraction chunk at a heading and keeps page order", async () => {
+		const lines = (field: string) =>
+			Array.from({ length: 10 }, (_, n) => `- ${field} book ${n + 1} by Author ${n + 1}`.padEnd(49, ".")).join("\n");
+		const page: PlannerSource = {
+			url: "https://www.susanrigetti.com/physics",
+			title: "Reading list",
+			text: `# Physics\n\n${lines("Physics")}\n\n# Math\n\n${lines("Math")}`,
+		};
+		const provider = scriptedProvider([
+			truncated,
+			extractResponse([{ section: "Physics", title: "Physics book 1", creator: "Author 1" }]),
+			extractResponse([{ section: "Math", title: "Math book 1", creator: "Author 1" }]),
+			TASKS,
+			SKILLS,
+		]);
+		const result = await planGoal(provider, initialState(), { ...INPUT, sources: [page] });
+		provider.assertDone();
+		expect(result.attempts).toBe(5);
+		const [whole, physics, math, tasks] = provider.calls;
+		expect(whole?.user).toContain(page.text);
+		expect(physics?.user).toContain(`# Physics\n\n${lines("Physics")}`);
+		expect(physics?.user).not.toContain("Math book");
+		expect(math?.user).toContain(`# Math\n\n${lines("Math")}`);
+		expect(math?.user).not.toContain("Physics book");
+		expect(tasks?.user).toContain(
+			"1. [www.susanrigetti.com] Physics — Physics book 1 by Author 1 (book)\n2. [www.susanrigetti.com] Math — Math book 1 by Author 1 (book)",
+		);
+	});
+
+	it("retries a thinking-only truncation once with the identical request", async () => {
+		const thinking = () => {
+			throw new TruncatedReplyError(4096, true);
+		};
+		const provider = scriptedProvider([thinking, TASKS, SKILLS]);
+		const result = await planGoal(provider, initialState(), INPUT);
+		expect(result).toEqual({ draft: VALID, attempts: 3, remapped: {} });
+		provider.assertDone();
+		expect(provider.calls[1]).toEqual(provider.calls[0]);
+	});
+
+	it("fails after a second thinking-only truncation of the same request", async () => {
+		const thinking = new TruncatedReplyError(4096, true);
+		const provider = scriptedProvider([
+			() => {
+				throw thinking;
+			},
+			() => {
+				throw thinking;
+			},
+		]);
+		await expect(planGoal(provider, initialState(), { ...INPUT, sources: [MATH] })).rejects.toMatchObject({
+			attempts: 2,
+			message: thinking.message,
+			errors: [thinking.message],
+		});
+		provider.assertDone();
+	});
+
+	it("splits a truncated task batch in half and continues the global task indices", async () => {
+		const items = [
+			{ section: "Proofs", title: "How to Prove It", creator: "Daniel J. Velleman" },
+			{ section: "Analysis", title: "Understanding Analysis", creator: "Stephen Abbott" },
+			{ section: "Analysis", title: "Principles of Mathematical Analysis", creator: "Walter Rudin" },
+		];
+		const provider = scriptedProvider([
+			extractResponse(items),
+			truncated,
+			JSON.stringify({
+				summary: "Proofs first, then analysis.",
+				tasks: [study("Read Velleman, How to Prove It, and write out every exercise proof", { item: 1 })],
+			}),
+			JSON.stringify({
+				tasks: [
+					study("Read Abbott, Understanding Analysis, and solve its exercises", { item: 2, after: [0] }),
+					study("Read Rudin, Principles of Mathematical Analysis, ch. 1–7, and solve the exercises", {
+						item: 3,
+						after: [0, 1],
+					}),
+				],
+			}),
+			JSON.stringify({
+				skills: [
+					skill("proof-writing", { developedBy: [{ task: 0, level: 2 }] }),
+					skill("real-analysis", {
+						developedBy: [
+							{ task: 1, level: 2 },
+							{ task: 2, level: 3 },
+						],
+					}),
+				],
+			}),
+		]);
+		const { draft, attempts } = await planGoal(provider, initialState(), uncapped([MATH]));
+		provider.assertDone();
+		expect(attempts).toBe(5);
+		const itemEnum = (values: readonly number[]) => ({
+			properties: { tasks: { items: { properties: { item: { enum: values } } } } },
+		});
+		const [, whole, firstHalf, secondHalf] = provider.calls;
+		expect(whole?.schema).toMatchObject(itemEnum([1, 2, 3]));
+		expect(firstHalf?.schema).toMatchObject(itemEnum([1]));
+		expect(firstHalf?.user).not.toContain("cut off");
+		expect(secondHalf?.schema).toMatchObject(itemEnum([2, 3]));
+		expect(secondHalf?.schema).not.toHaveProperty("properties.summary");
+		expect(secondHalf?.user).toContain("0. Read Velleman, How to Prove It, and write out every exercise proof");
+		expect(draft.summary).toBe("Proofs first, then analysis.");
+		expect(draft.tasks.map((t) => t.after)).toEqual([[], ["t1"], ["t1", "t2"]]);
+		expect(draft.tasks.map((t) => t.develops)).toEqual([
+			[{ skill: "proof-writing", level: 2 }],
+			[{ skill: "real-analysis", level: 2 }],
+			[{ skill: "real-analysis", level: 3 }],
+		]);
+	});
+
+	it("repairs a task batch that leaves a curriculum item without a task", async () => {
+		const velleman = study("Read Velleman, How to Prove It, and write out every exercise proof", { item: 1 });
+		const abbott = study("Read Abbott, Understanding Analysis, and solve its exercises", { item: 2 });
+		const provider = scriptedProvider([
+			extractResponse([
+				{ title: "How to Prove It", creator: "Daniel J. Velleman" },
+				{ title: "Understanding Analysis", creator: "Stephen Abbott" },
+			]),
+			// Two tasks pass the schema's count; both work on item 1.
+			JSON.stringify({
+				summary: "Proofs, then analysis.",
+				tasks: [velleman, study("Write a two-page summary of Velleman ch. 1", { item: 1, category: "writing" })],
+			}),
+			JSON.stringify({ summary: "Proofs, then analysis.", tasks: [velleman, abbott] }),
+			JSON.stringify({ skills: [skill("proof-writing", { developedBy: [{ task: 0, level: 2 }] })] }),
+		]);
+		const { draft } = await planGoal(provider, initialState(), uncapped([MATH]));
+		provider.assertDone();
+		expect(provider.calls[2]?.user).toContain("1. curriculum items 2 have no task");
+		expect(draft.tasks.map((t) => t.title)).toEqual([velleman.title, abbott.title]);
 	});
 });
 
@@ -569,6 +1034,13 @@ describe("openAiCompatibleProvider", () => {
 		expect(JSON.parse(seen[0]?.init.body as string)).toMatchObject({ max_tokens: 4096 });
 	});
 
+	it("sends the configured budget when the request names none", async () => {
+		const { fetch, seen } = capture(() => reply("{}"));
+		const { maxTokens: _, ...unbudgeted } = request;
+		await openAiCompatibleProvider(config, { userAgent, fetch }).completeJson(unbudgeted);
+		expect(JSON.parse(seen[0]?.init.body as string)).toMatchObject({ max_tokens: 4096 });
+	});
+
 	it("omits the authorization header without an API key", async () => {
 		const { fetch, seen } = capture(() => reply("{}"));
 		await openAiCompatibleProvider({ ...config, apiKey: null }, { userAgent, fetch }).completeJson(request);
@@ -632,6 +1104,111 @@ describe("openAiCompatibleProvider", () => {
 		expect(error.message).toBe("reply truncated at max_tokens 99");
 	});
 
+	const unavailable =
+		'{"error":{"type":"invalid_request_error","message":"Upstream request failed: [invalid_request_error] This response_format type is unavailable now (request_id abc)"}}';
+	const overloaded = '{"error":{"message":"Upstream request failed: model overloaded, try again"}}';
+
+	function sequence(responses: readonly (() => Response)[]): {
+		fetch: typeof fetch;
+		calls: () => number;
+		bodies: unknown[];
+	} {
+		let calls = 0;
+		const bodies: unknown[] = [];
+		const fakeFetch = (async (_url: string, init: RequestInit) => {
+			bodies.push(JSON.parse(init.body as string));
+			const next = responses[calls++];
+			if (next === undefined) throw new Error("unexpected extra request");
+			return next();
+		}) as typeof fetch;
+		return { fetch: fakeFetch, calls: () => calls, bodies };
+	}
+
+	it("resends a refused json_schema request at once in JSON mode with the schema in the system prompt", async () => {
+		const { fetch, bodies } = sequence([() => new Response(unavailable, { status: 400 }), () => reply('{"ok":true}')]);
+		const sleep = async () => {
+			throw new Error("must not sleep");
+		};
+		const content = await openAiCompatibleProvider(config, { userAgent, fetch, sleep }).completeJson(request);
+		expect(content).toBe('{"ok":true}');
+		expect(bodies).toHaveLength(2);
+		expect(bodies[0]).toMatchObject({ response_format: { type: "json_schema" } });
+		expect(bodies[1]).toMatchObject({
+			response_format: { type: "json_object" },
+			messages: [
+				{
+					role: "system",
+					content: 'sys\n\nReply with one JSON object that matches this JSON Schema:\n{"type":"object"}',
+				},
+				{ role: "user", content: "usr" },
+			],
+		});
+	});
+
+	it("retries a transient gateway 400 after 2 s and returns the next reply", async () => {
+		const { fetch, calls } = sequence([() => new Response(overloaded, { status: 400 }), () => reply('{"ok":true}')]);
+		const sleeps: number[] = [];
+		const sleep = async (ms: number) => {
+			sleeps.push(ms);
+		};
+		const content = await openAiCompatibleProvider(config, { userAgent, fetch, sleep }).completeJson(request);
+		expect(content).toBe('{"ok":true}');
+		expect(calls()).toBe(2);
+		expect(sleeps).toEqual([2000]);
+	});
+
+	it("gives up after 3 tries of transient failures with the last error", async () => {
+		const { fetch, calls } = sequence([
+			() => new Response("bad gateway", { status: 502 }),
+			() => {
+				throw new TypeError("fetch failed");
+			},
+			() => new Response(overloaded, { status: 400 }),
+		]);
+		const sleeps: number[] = [];
+		const sleep = async (ms: number) => {
+			sleeps.push(ms);
+		};
+		const error = (await openAiCompatibleProvider(config, { userAgent, fetch, sleep })
+			.completeJson(request)
+			.catch((e: unknown) => e)) as Error;
+		expect(error.message).toMatch(/^LLM request failed: HTTP 400: .*overloaded/);
+		expect(calls()).toBe(3);
+		expect(sleeps).toEqual([2000, 6000]);
+	});
+
+	it("does not retry a plain 400", async () => {
+		const { fetch, calls } = sequence([
+			() => new Response('{"error":"invalid json_schema: unknown keyword"}', { status: 400 }),
+		]);
+		const sleep = async () => {
+			throw new Error("must not sleep");
+		};
+		const error = (await openAiCompatibleProvider(config, { userAgent, fetch, sleep })
+			.completeJson(request)
+			.catch((e: unknown) => e)) as Error;
+		expect(error.message).toContain("HTTP 400");
+		expect(calls()).toBe(1);
+	});
+
+	it("rejects promptly when the caller aborts during the retry wait", async () => {
+		vi.useFakeTimers();
+		try {
+			const { fetch, calls } = sequence([() => new Response("busy", { status: 503 }), () => reply("{}")]);
+			const controller = new AbortController();
+			const pending = openAiCompatibleProvider(config, { userAgent, fetch })
+				.completeJson(request, controller.signal)
+				.catch((e: unknown) => e);
+			await vi.advanceTimersByTimeAsync(100);
+			controller.abort();
+			const error = (await pending) as Error;
+			expect(error.name).toBe("AbortError");
+			expect(calls()).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	/** Server-sent events from `chunks` (`[DONE]` passed through as is), one byte per read so lines, JSON and characters arrive cut apart. */
 	function sse(chunks: readonly unknown[]): Response {
 		const text = chunks
@@ -683,6 +1260,21 @@ describe("openAiCompatibleProvider", () => {
 			.catch((e: unknown) => e)) as Error;
 		expect(error).toBeInstanceOf(TruncatedReplyError);
 		expect(error.message).toBe("reply truncated at max_tokens 99");
+		expect((error as TruncatedReplyError).thinkingOnly).toBe(false);
+	});
+
+	it("reports a streamed reply cut off while still thinking as a thinking-only TruncatedReplyError", async () => {
+		const { fetch } = capture(() =>
+			sse([delta({ reasoning_content: "Erst die Kapitel zählen…" }), delta({}, "length"), "[DONE]"]),
+		);
+		const error = (await openAiCompatibleProvider(config, { userAgent, fetch })
+			.completeJson(request)
+			.catch((e: unknown) => e)) as TruncatedReplyError;
+		expect(error).toBeInstanceOf(TruncatedReplyError);
+		expect(error.thinkingOnly).toBe(true);
+		expect(error.message).toBe(
+			"the model's thinking used the whole reply budget of 99 tokens before it answered; raise Max reply tokens in Settings (or DAWNSKILL_LLM_MAX_TOKENS)",
+		);
 	});
 
 	it("rejects on an error sent mid-stream, without the API key", async () => {
