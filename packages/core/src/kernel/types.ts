@@ -70,6 +70,12 @@ export interface Task {
 	readonly urgency: Likert;
 	readonly status: TaskStatus;
 	readonly requirements: readonly Requirement[];
+	/**
+	 * Skills this task builds (study work: read a book and solve its exercises, write an essay). Never
+	 * blocks and plans no learning steps; completing the task proposes each level. Absent when empty,
+	 * so tasks from older event logs keep their canonical form.
+	 */
+	readonly develops?: readonly Requirement[];
 	readonly learning: LearningSpec | null;
 	readonly createdAt: Iso;
 	readonly updatedAt: Iso;
@@ -154,6 +160,8 @@ export interface DraftTask {
 	readonly importance: Likert;
 	readonly urgency: Likert;
 	readonly requires: readonly Requirement[];
+	/** Skills the task builds (see `Task.develops`); absent or non-empty. */
+	readonly develops?: readonly Requirement[];
 	/** Refs of draft tasks that must finish first. */
 	readonly after: readonly string[];
 }
@@ -173,7 +181,7 @@ export type ProposalPayload =
 			readonly skill: SkillKey;
 			readonly level: TargetLevel;
 			readonly evidence: string;
-			/** Learning task whose completion triggered the proposal, if any. */
+			/** Learning or developing task whose completion triggered the proposal, if any. */
 			readonly fromTaskId: TaskId | null;
 	  };
 

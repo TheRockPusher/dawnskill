@@ -27,18 +27,25 @@ export function nextInterval(streak: number, previous: number): number {
 	return Math.ceil(previous * REVIEW_EASE);
 }
 
-/** Spaced-review schedule for every skill with at least one done learning task, sorted by dueAt then skill. */
+/**
+ * Spaced-review schedule for every skill with at least one done learning task or done task that
+ * develops it, sorted by dueAt then skill.
+ */
 export function reviewSchedule(state: KernelState, now: Iso): ReviewItem[] {
 	const nowMs = Date.parse(now);
 	const anchors = new Map<SkillKey, { at: number; prompts: readonly string[] }>();
 	for (const c of state.completions) {
 		if (c.status !== "done") continue;
-		const skill = state.tasks[c.taskId]?.learning?.skill;
-		const def = skill === undefined ? undefined : state.skills[skill];
-		if (skill === undefined || def === undefined) continue;
+		const task = state.tasks[c.taskId];
+		if (task === undefined) continue;
+		const skills = task.learning === null ? (task.develops ?? []).map((d) => d.skill) : [task.learning.skill];
 		const at = Date.parse(c.at);
-		const prev = anchors.get(skill);
-		if (prev === undefined || at > prev.at) anchors.set(skill, { at, prompts: def.retrievalPrompts });
+		for (const skill of skills) {
+			const def = state.skills[skill];
+			if (def === undefined) continue;
+			const prev = anchors.get(skill);
+			if (prev === undefined || at > prev.at) anchors.set(skill, { at, prompts: def.retrievalPrompts });
+		}
 	}
 	const items: ReviewItem[] = [];
 	for (const [skill, { at: anchor, prompts }] of anchors) {
