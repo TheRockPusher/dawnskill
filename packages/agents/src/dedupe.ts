@@ -22,7 +22,7 @@ const CANDIDATE_JACCARD = 0.5;
 const MAX_JUDGE_CALLS = 8;
 const JUDGE_MAX_TOKENS = 20;
 
-const JUDGE_SYSTEM = `You compare two skill definitions from a software developer's skill inventory.
+const JUDGE_SYSTEM = `You compare two skill definitions from a learner's skill inventory (software or any field of study).
 They are the SAME skill only if a person's Dreyfus level in one would always equal their level in the other: same technology or domain and same capability, differing only in wording.
 A broader versus a narrower capability, or the same capability in a different technology, is NOT the same skill.
 Answer with JSON: {"same": true} or {"same": false}.`;
@@ -124,13 +124,21 @@ function remapSkill(draft: PlanDraft, from: SkillKey, to: SkillKey): PlanDraft {
 				prerequisites: [...new Set(skill.prerequisites.map(rename))].filter((key) => key !== skill.key),
 			})),
 		tasks: draft.tasks.map((task) => {
-			const merged = new Map<SkillKey, Requirement>();
-			for (const { skill, level } of task.requires) {
-				const key = rename(skill);
-				const seen = merged.get(key);
-				if (seen === undefined || level > seen.level) merged.set(key, { skill: key, level });
-			}
-			return { ...task, requires: [...merged.values()] };
+			const remapped = (links: readonly Requirement[]): Requirement[] => {
+				const merged = new Map<SkillKey, Requirement>();
+				for (const { skill, level } of links) {
+					const key = rename(skill);
+					const seen = merged.get(key);
+					if (seen === undefined || level > seen.level) merged.set(key, { skill: key, level });
+				}
+				return [...merged.values()];
+			};
+			const { develops, ...rest } = task;
+			return {
+				...rest,
+				requires: remapped(task.requires),
+				...(develops === undefined ? {} : { develops: remapped(develops) }),
+			};
 		}),
 	};
 }

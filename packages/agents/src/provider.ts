@@ -53,8 +53,8 @@ export interface JsonRequest {
 	readonly schemaName: string;
 	/** Plain JSON Schema object, strict-mode compatible. */
 	readonly schema: object;
-	/** Tokens the reply may need at most; the provider caps it at its configured budget. */
-	readonly maxTokens: number;
+	/** Tokens the reply may need at most, capped at the configured budget; absent: the configured budget. */
+	readonly maxTokens?: number;
 }
 
 /** One streamed chunk of a reply. `reasoning`: the model's thinking (`delta.reasoning_content` from llama.cpp/DeepSeek/vLLM, or `delta.reasoning` from OpenRouter/Ollama); `content`: answer text. Either may be "". */
@@ -74,6 +74,8 @@ export interface ProviderOptions {
 	/** Sent as `User-Agent`, e.g. `dawnskill/0.2.0`; hosted gateways such as OpenCode Go ask clients to identify themselves. */
 	readonly userAgent: string;
 	readonly fetch?: typeof fetch;
+	/** Waits between retries of transient failures; must reject with `signal.reason` when `signal` aborts. Tests inject an instant one. */
+	readonly sleep?: (ms: number, signal: AbortSignal | undefined) => Promise<void>;
 }
 
 /** The server cannot fit the request into the model's context; retrying cannot help. */
@@ -84,11 +86,21 @@ export class ContextSizeError extends Error {
 	}
 }
 
-/** The reply hit `max_tokens` before it ended (`finish_reason: "length"`); a shorter retry may succeed. */
+/**
+ * The reply hit `max_tokens` before it ended (`finish_reason: "length"`). `thinkingOnly`: no answer content
+ * arrived first, so the model's thinking used the whole budget and a shorter retry cannot help; otherwise a
+ * shorter retry may succeed.
+ */
 export class TruncatedReplyError extends Error {
-	constructor(maxTokens: number) {
-		super(`reply truncated at max_tokens ${maxTokens}`);
+	readonly thinkingOnly: boolean;
+	constructor(maxTokens: number, thinkingOnly: boolean) {
+		super(
+			thinkingOnly
+				? `the model's thinking used the whole reply budget of ${maxTokens} tokens before it answered; raise Max reply tokens in Settings (or DAWNSKILL_LLM_MAX_TOKENS)`
+				: `reply truncated at max_tokens ${maxTokens}`,
+		);
 		this.name = "TruncatedReplyError";
+		this.thinkingOnly = thinkingOnly;
 	}
 }
 
@@ -98,6 +110,13 @@ const DEFAULT_MAX_TOKENS = 4096;
 const ERROR_BODY_CHARS = 300;
 /** llama.cpp `exceed_context_size_error`, OpenAI `context_length_exceeded`, vLLM "maximum context length". */
 const CONTEXT_ERROR = /exceed_context_size|context_length_exceeded|context (?:size|length|window)/i;
+/** HTTP 400 bodies of gateway hiccups ("Upstream request failed", "overloaded"); the same request succeeds on retry. */
+const TRANSIENT_ERROR = /unavailable now|temporarily unavailable|upstream request failed|overloaded|try again/i;
+/** HTTP 400 refusing `json_schema` (OpenCode Go: "This response_format type is unavailable now", ~1 in 6 requests). */
+const RESPONSE_FORMAT_ERROR = /response_format[^"]*(?:unavailable|not supported|unsupported)/i;
+const TRANSIENT_STATUS: ReadonlySet<number> = new Set([408, 429, 500, 502, 503, 504]);
+/** Waits before the 2nd and 3rd try of a transient failure; only failures before the body is read are retried. */
+const RETRY_DELAYS_MS = [2_000, 6_000] as const;
 
 /** Null when `DAWNSKILL_LLM_BASE_URL` is unset or blank: no model is configured by the environment. */
 export function llmConfigFromEnv(env: Readonly<Record<string, string | undefined>>): LlmConfig | null {
@@ -113,7 +132,7 @@ export function llmConfigFromEnv(env: Readonly<Record<string, string | undefined
 	};
 }
 
-/** Request limits; they also apply to a model configured in the app. */
+/** Request limits from the environment; settings saved in the app use them only where they omit `maxTokens`/`timeoutMs`. */
 export function llmLimitsFromEnv(env: Readonly<Record<string, string | undefined>>): LlmLimits {
 	return {
 		timeoutMs: positiveInteger(env, "DAWNSKILL_LLM_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
@@ -147,51 +166,104 @@ export function openAiCompatibleProvider(config: LlmConfig, options: ProviderOpt
 	const redact = (text: string): string =>
 		config.apiKey === null ? text : text.replaceAll(config.apiKey, "[redacted]");
 
+	const sleep = options.sleep ?? abortableSleep;
+
 	return {
 		model: config.model,
 		async completeJson(request, signal, onDelta) {
-			const timeout = AbortSignal.timeout(config.timeoutMs);
-			const maxTokens = Math.min(request.maxTokens, config.maxTokens);
-			const body = JSON.stringify({
-				model: config.model,
-				messages: [
-					{ role: "system", content: request.system },
-					{ role: "user", content: request.user },
-				],
-				temperature: 0.2,
-				max_tokens: maxTokens,
-				stream: true,
-				response_format: {
-					type: "json_schema",
-					json_schema: { name: request.schemaName, strict: true, schema: request.schema },
-				},
+			const maxTokens = Math.min(request.maxTokens ?? config.maxTokens, config.maxTokens);
+			const bodyWith = (system: string, responseFormat: object): string =>
+				JSON.stringify({
+					model: config.model,
+					messages: [
+						{ role: "system", content: system },
+						{ role: "user", content: request.user },
+					],
+					temperature: 0.2,
+					max_tokens: maxTokens,
+					stream: true,
+					response_format: responseFormat,
+				});
+			let body = bodyWith(request.system, {
+				type: "json_schema",
+				json_schema: { name: request.schemaName, strict: true, schema: request.schema },
 			});
-			const aborted = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
-			try {
-				const response = await fetchImpl(url, { method: "POST", headers, body, signal: aborted });
-				if (!response.ok) {
+			let fellBack = false;
+			for (let attempt = 0; ; attempt++) {
+				const timeout = AbortSignal.timeout(config.timeoutMs);
+				const aborted = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+				try {
+					let response: Response;
+					try {
+						response = await fetchImpl(url, { method: "POST", headers, body, signal: aborted });
+					} catch (error) {
+						// Network failure before any reply: transient, unless the caller aborted or our timeout fired.
+						if (aborted.aborted || attempt >= RETRY_DELAYS_MS.length) throw error;
+						await sleep(RETRY_DELAYS_MS[attempt] as number, signal);
+						continue;
+					}
+					if (response.ok) {
+						if (response.headers.get("content-type")?.includes("text/event-stream") === true) {
+							return await streamedContent(response, aborted, maxTokens, redact, onDelta);
+						}
+						return messageContent(await response.json(), maxTokens);
+					}
 					const text = redact(await response.text()).slice(0, ERROR_BODY_CHARS);
 					if (CONTEXT_ERROR.test(text)) throw new ContextSizeError(`HTTP ${response.status}: ${text}`);
-					throw new Error(`LLM request failed: HTTP ${response.status}: ${text}`);
+					if (response.status === 400 && !fellBack && RESPONSE_FORMAT_ERROR.test(text)) {
+						// json_schema refused: resend at once in JSON mode, the schema in the prompt. The caller
+						// validates every reply against the schema anyway. Does not use a retry.
+						fellBack = true;
+						body = bodyWith(
+							`${request.system}\n\nReply with one JSON object that matches this JSON Schema:\n${JSON.stringify(request.schema)}`,
+							{ type: "json_object" },
+						);
+						attempt--;
+						continue;
+					}
+					const transient =
+						TRANSIENT_STATUS.has(response.status) || (response.status === 400 && TRANSIENT_ERROR.test(text));
+					if (!transient || attempt >= RETRY_DELAYS_MS.length) {
+						throw new Error(`LLM request failed: HTTP ${response.status}: ${text}`);
+					}
+					await sleep(RETRY_DELAYS_MS[attempt] as number, signal);
+				} catch (error) {
+					if (timeout.aborted && signal?.aborted !== true) {
+						throw new Error(`LLM request timed out after ${config.timeoutMs} ms`, { cause: error });
+					}
+					throw error;
 				}
-				if (response.headers.get("content-type")?.includes("text/event-stream") === true) {
-					return await streamedContent(response, aborted, maxTokens, redact, onDelta);
-				}
-				return messageContent(await response.json(), maxTokens);
-			} catch (error) {
-				if (timeout.aborted && signal?.aborted !== true) {
-					throw new Error(`LLM request timed out after ${config.timeoutMs} ms`, { cause: error });
-				}
-				throw error;
 			}
 		},
 	};
 }
 
+/** Resolves after `ms`; rejects at once with the abort reason when `signal` aborts first. */
+function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	if (signal?.aborted === true) {
+		reject(signal.reason);
+		return promise;
+	}
+	const onAbort = (): void => {
+		clearTimeout(timer);
+		reject(signal?.reason);
+	};
+	const timer = setTimeout(() => {
+		signal?.removeEventListener("abort", onAbort);
+		resolve();
+	}, ms);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	return promise;
+}
+
 function messageContent(payload: unknown, maxTokens: number): string {
 	if (!Value.Check(COMPLETION, payload)) throw new Error("LLM response has no choices[0].message");
 	const choice = payload.choices[0];
-	if (choice?.finish_reason === "length") throw new TruncatedReplyError(maxTokens);
+	if (choice?.finish_reason === "length") {
+		const content = choice.message?.content;
+		throw new TruncatedReplyError(maxTokens, typeof content !== "string" || content === "");
+	}
 	const message = choice?.message;
 	if (typeof message?.content === "string") return message.content;
 	if (typeof message?.refusal === "string") {
@@ -242,7 +314,7 @@ async function streamedContent(
 		content += piece;
 		refusal += delta?.refusal ?? "";
 		if (piece !== "" || thought !== "") onDelta?.({ reasoning: thought, content: piece });
-		if (choice.finish_reason === "length") throw new TruncatedReplyError(maxTokens);
+		if (choice.finish_reason === "length") throw new TruncatedReplyError(maxTokens, content === "");
 		return false;
 	};
 
