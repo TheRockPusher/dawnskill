@@ -31,3 +31,4 @@ Per-feature verification recipes for the web UI. Each recipe is a sequence of Ja
 - [model-settings.md](model-settings.md): save, inspect and remove the planner model connection in Settings; the API key never leaves the host; a planner run against an unreachable model fails visibly.
 - [planner-run.md](planner-run.md): a real planner run against the host's local `llama-server`, reviewed and rejected on the Plan page.
 - [plan-queue.md](plan-queue.md): queue several goals while the planner is busy, cancel a queued and a running run, and confirm a cancelled run never proposes.
+- [planner-curriculum.md](planner-curriculum.md): a whole-curriculum planner run against the cloud model from three linked reading-list pages (`Sources`, `Plan the whole curriculum (no task limit)`): run sources and stages, many study tasks with `Builds` chips, no meta tasks.

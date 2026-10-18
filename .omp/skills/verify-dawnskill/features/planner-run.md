@@ -96,3 +96,4 @@ Preconditions:
 - `Reject` asks `Reject this draft?` via `window.confirm`; the preamble opens the tab with `dialogs: "accept"`. Without it the click silently does nothing.
 - The key file belongs to the host's inference setup; the recipe reads it but never writes, prints or saves it. Scratch `llm-settings.json` holds it until step 5 or cleanup removes it.
 - A run against the local model uses shared CPU; do not run this recipe in parallel with other planner runs. Runs queued in the same instance wait for this one, and other processes using the same `llama-server` slow it down.
+- Plans that need a capable model (long sources, curricula) use the cloud model in `~/.config/dawnskill/verify.env` (mode 600, outside the repo): `DAWNSKILL_LLM_BASE_URL`, `DAWNSKILL_LLM_MODEL` (OpenCode Go, `deepseek-v4.1-flash`), `DAWNSKILL_LLM_API_KEY`. Read it into the Settings form like the local key file above; never print, log, commit or copy the key into evidence.
