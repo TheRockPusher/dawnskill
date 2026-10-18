@@ -1,10 +1,11 @@
 # Model settings
 
-In Settings → Model the user saves the planner's OpenAI-compatible connection (base URL, model, API key) without restarting. The host stores it in `$DATA_DIR/llm-settings.json` (mode 0600), reports the connection without ever returning the key, keeps it out of exports, and enables `Ask the planner`. A planner run against an unreachable endpoint fails visibly on the Plan page. `Remove saved settings` deletes the file and returns to "no model".
+In Settings → Model the user saves the planner's OpenAI-compatible connection (base URL, model, API key, Max reply tokens, Timeout) without restarting. The host stores it in `$DATA_DIR/llm-settings.json` (mode 0600), reports the connection and its effective limits without ever returning the key, keeps it out of exports, and enables `Ask the planner`. A planner run against an unreachable endpoint fails visibly on the Plan page. `Remove saved settings` deletes the file and returns to "no model".
 
 ## Sub-features
 
 - `llm-save` saves base URL, model and key; the page shows `Planner model: <model> (saved in this app)`.
+- `llm-limits` `Max reply tokens` and `Timeout (seconds)` start at the defaults 4096 and 120 (`serve.sh` unsets `DAWNSKILL_LLM_*`); saved as 32768 and 300 they appear in `/api/config` as `maxTokens: 32768`, `timeoutMs: 300000` and in the file; after removal `/api/config` reports the defaults again.
 - `llm-key-hidden` the key field is a password input, empty after saving (placeholder `Saved — leave blank to keep it`); `/api/config` has only `hasApiKey`; `/api/export` never contains the key.
 - `llm-file` `llm-settings.json` exists with mode `600`.
 - `plan-run-failed` `Ask the planner` against an unreachable endpoint ends `failed` with `fetch failed`.
@@ -33,15 +34,19 @@ Preconditions:
    await tab.fill("label/Model", R4.model);
    await tab.fill("label/API key", R4.key);
    out.push(await tab.attr("label/API key", "type"));
+   out.push(await tab.value("label/Max reply tokens"), await tab.value("label/Timeout"));
+   await tab.fill("label/Max reply tokens", "32768");
+   await tab.fill("label/Timeout", "300");
    await tab.click('role/button[name="Save model settings"]');
    await tab.waitForSelector('role/button[name="Remove saved settings"]');
    out.push(await tab.text("text/Planner model:"));
    out.push(await tab.attr("label/API key", "placeholder"));
    out.push(await tab.value("label/API key"));
+   out.push(await tab.value("label/Max reply tokens"), await tab.value("label/Timeout"));
    await proof("model-settings", "1-saved");
    return out;
    ```
-   Returns `["No model configured — planning is unavailable; manual tasks still work.", "password", "Planner model: verify-model-<tag> (saved in this app)", "Saved — leave blank to keep it", ""]`.
+   Returns `["No model configured — planning is unavailable; manual tasks still work.", "password", "4096", "120", "Planner model: verify-model-<tag> (saved in this app)", "Saved — leave blank to keep it", "", "32768", "300"]`: the limit fields start at the defaults and show the saved values after the save.
 2. **Second view of the save.**
    ```js
    const config = await api("/api/config", "model-settings/config-saved.http");
@@ -50,9 +55,9 @@ Preconditions:
    const mode = (await Bun.$`stat -c %a ${file}`.text()).trim();
    const saved = await Bun.file(file).json();
    await Bun.write(`${E.EVIDENCE}/model-settings/llm-settings.txt`, `mode ${mode}\n${JSON.stringify(saved)}\n`);
-   return [config, config.includes(R4.key), exported.includes(R4.key) || exported.includes(R4.baseUrl), mode, saved.apiKey === R4.key && saved.model === R4.model];
+   return [config, config.includes(R4.key), exported.includes(R4.key) || exported.includes(R4.baseUrl), mode, saved.apiKey === R4.key && saved.model === R4.model && saved.maxTokens === 32768 && saved.timeoutMs === 300000];
    ```
-   Returns `["HTTP 200\n{…\"llm\":{\"configured\":true,\"source\":\"app\",\"model\":\"verify-model-<tag>\",\"baseUrl\":\"http://127.0.0.1:9/v1\",\"hasApiKey\":true}}\n", false, false, "600", true]`: no key in `/api/config`, no key and no base URL in the export, file mode 600, file holds the key.
+   Returns `["HTTP 200\n{…\"llm\":{\"configured\":true,\"source\":\"app\",\"model\":\"verify-model-<tag>\",\"baseUrl\":\"http://127.0.0.1:9/v1\",\"hasApiKey\":true,\"maxTokens\":32768,\"timeoutMs\":300000}}\n", false, false, "600", true]`: no key in `/api/config`, the saved limits reported, no key and no base URL in the export, file mode 600, file holds the key and the limits.
 3. **Planner run fails visibly.**
    ```js
    const out = [];
@@ -80,7 +85,7 @@ Preconditions:
    ```js
    return [await api("/api/config", "model-settings/config-removed.http"), await Bun.file(`${E.DATA_DIR}/llm-settings.json`).exists()];
    ```
-   Returns `["HTTP 200\n{…\"llm\":{\"configured\":false,\"source\":null,\"model\":null,\"baseUrl\":null,\"hasApiKey\":false}}\n", false]`. Files land in `$EVIDENCE/model-settings/`.
+   Returns `["HTTP 200\n{…\"llm\":{\"configured\":false,\"source\":null,\"model\":null,\"baseUrl\":null,\"hasApiKey\":false,\"maxTokens\":4096,\"timeoutMs\":120000}}\n", false]`. Files land in `$EVIDENCE/model-settings/`.
 
 ## Gotchas
 

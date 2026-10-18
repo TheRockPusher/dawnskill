@@ -73,20 +73,24 @@ If a step would take more than 480 min, the skill is too broad. The planner shou
 
 **Limits.** The just-in-time studies time *information presentation* within one training session. Extending this to "schedule whole learning tasks only when a real task needs them, and make their output reusable there" is our interpretation: **product heuristic**.
 
+**Exception: a curriculum the user supplies.** When the user links curriculum or reading-list pages (or pastes one into the context) the planner plans that curriculum as ordinary study tasks, and with "Plan the whole curriculum" it plans all of it. That is not speculative curriculum in the sense above: the user chose it, and its tasks are the goal's work, not learning tasks generated for a gap. **Product heuristic.**
+
+**Rule (study tasks that develop a skill).** A task may name skills it develops (`Task.develops`: skill and the level it brings the user to, 1–5, above any level the task itself requires). Such a link never blocks the task and never creates learning steps: only `requirements` produce gaps (§2). Completing the task requires an outcome, and creates a pending level proposal for each developed skill the user has not reached yet, with the outcome as evidence. The level changes only when the user confirms it (K1, §8). **Product heuristic**: studying a book or course is the practice that builds the skill, so it should feed the same evidence-and-confirmation loop as a learning task without pretending to be a gap.
+
 ## 5. Retrieval practice and spaced review
 
 **Rule.**
 - Every skill carries **2–4 retrieval prompts** (`retrievalPrompts`; **product heuristic**: enough to cover the key concepts while keeping a review under a few minutes).
 - A prompt must ask the user to produce an answer (recall, write, explain), not recognise one.
-- Reviews are **per skill**. A skill enters review once it has at least one `done` learning task. One review shows all of the skill's retrieval prompts. The user grades the whole review as `recalled` or `forgot` (`ReviewRecorded`).
+- Reviews are **per skill**. A skill enters review once it has at least one `done` learning task or one `done` task that develops it (§4). One review shows all of the skill's retrieval prompts. The user grades the whole review as `recalled` or `forgot` (`ReviewRecorded`).
 
 | Situation | Next review after |
 |---|---|
-| first learning task for the skill done, no review yet | 1 day |
+| first learning task or developing task for the skill done, no review yet | 1 day |
 | n-th consecutive `recalled` (n = 1, 2, 3, …) | I(n+1): 6, 15, 38, 95, 238, 595, … days |
 | `forgot` | 1 day; the streak resets to 0 |
 
-Here I(1) = 1, I(2) = 6, and `I(k) = ceil(I(k−1) × 2.5)` in whole days for k > 2. The due date is the time of the last review (or of the first learning-task completion) plus the interval, with the clock injected.
+Here I(1) = 1, I(2) = 6, and `I(k) = ceil(I(k−1) × 2.5)` in whole days for k > 2. The due date is the time of the last review (or of the first such completion) plus the interval, with the clock injected.
 
 **Why this is exactly SM-2 restricted to two grades.** SM-2 sets I(1)=1, I(2)=6, I(n)=I(n−1)·EF with initial EF=2.5, and rounds fractional intervals up. Its EF update `EF' = EF + (0.1 − (5−q)(0.08 + (5−q)·0.02))` leaves EF unchanged at q=4. For q<3 it restarts the repetitions *without changing EF* (Wozniak 1990, [SM-2 description](https://super-memory.com/english/ol/sm2.htm)). So if `recalled` = q=4 and `forgot` = q<3, EF stays at 2.5 forever. Anki's legacy SM-2 scheduler also defaults its starting ease to 2.50 ([Anki manual: Starting Ease](https://docs.ankiweb.net/deck-options.html); [Anki FAQ: SM-2](https://docs.ankiweb.net/faqs/what-spaced-repetition-algorithm)).
 

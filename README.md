@@ -27,6 +27,7 @@ flowchart TD
 - A task is blocked while it has an open blocker or any skill gap. A skill nobody has rated counts as a gap. Finishing a learning task does not raise the level by itself: it creates a level proposal, and the gap stays open until you confirm it.
 - For a task you add by hand, **Add learning steps** on its page creates the learning steps for its gaps. Plan approval uses the same generator.
 - Ready tasks are ranked by a weighted score, and a learning task takes on the priority of the most important task waiting on it.
+- To plan from a curriculum or reading list, paste its links into **Sources** on the Plan page (one URL per line; links in the goal or context are read too, 10 pages at most). The planner reads the pages first and is instructed to turn their books and courses into concrete study tasks, not planning chores like building a tracker or a schedule. By default a plan has 3–12 tasks of up to 8 hours each and starts at the top of the list; tick **Plan the whole curriculum (no task limit)** to plan every item. Study tasks name the skills they build (the **Builds** column of a draft): they never block anything, and finishing one (with a note on what you learned) proposes the new level for you to confirm.
 
 ## Quick start
 
@@ -70,7 +71,7 @@ The server runs its TypeScript directly through Node's type stripping, so there 
 
 The planner talks to any OpenAI-compatible `chat/completions` endpoint: llama.cpp `llama-server`, Ollama, vLLM or a hosted API.
 
-Set the connection in the web UI under **Settings → Model**; no restart or environment variable is needed. **Service** offers presets for OpenCode Go and OpenRouter, which fill in the base URL and a suggested model, or **Custom URL** for any other server. The host stores the settings in `$DATA_DIR/llm-settings.json` (file mode 0600, API key in plain text) and never returns the key to the browser. To protect it, a saved key is reused only for the URL it was entered for: changing the base URL, including switching presets, requires entering the key again. Settings saved in the app take precedence over the variables below. **Remove saved settings** deletes the file, and the variables apply again.
+Set the connection in the web UI under **Settings → Model**; no restart or environment variable is needed. **Service** offers presets for OpenCode Go and OpenRouter, which fill in the base URL, a suggested model, **Max reply tokens** 32768 and **Timeout** 300 s, or **Custom URL** for any other server. **Max reply tokens** caps `max_tokens` on every request, thinking included; **Timeout (seconds)** bounds each request. Both are saved with the connection; a local llama.cpp or Ollama server works with 4096 and 120 s. The host stores the settings in `$DATA_DIR/llm-settings.json` (file mode 0600, API key in plain text) and never returns the key to the browser. To protect it, a saved key is reused only for the URL it was entered for: changing the base URL, including switching presets, requires entering the key again. Settings saved in the app take precedence over the variables below. **Remove saved settings** deletes the file, and the variables apply again.
 
 The same connection can come from environment variables instead:
 
@@ -80,11 +81,11 @@ The same connection can come from environment variables instead:
 | `DAWNSKILL_LLM_API_KEY` | none | Sent as `Authorization: Bearer …`; redacted from error messages |
 | `DAWNSKILL_LLM_MODEL` | `default` | `model` field of each request |
 | `DAWNSKILL_LLM_TIMEOUT_MS` | `120000` | Per-request timeout |
-| `DAWNSKILL_LLM_MAX_TOKENS` | `4096` | Upper bound on `max_tokens` for every request. Size it to your model's context window |
+| `DAWNSKILL_LLM_MAX_TOKENS` | `4096` | Upper bound on `max_tokens` for every request, thinking included. Size it to your model's context window |
 
-`DAWNSKILL_LLM_TIMEOUT_MS` and `DAWNSKILL_LLM_MAX_TOKENS` also apply to a model set in the app.
+`DAWNSKILL_LLM_TIMEOUT_MS` and `DAWNSKILL_LLM_MAX_TOKENS` also apply to a model set in the app when it was saved without **Max reply tokens** and **Timeout**; the form always saves both.
 
-The server must support structured outputs. Every request sends `response_format: { type: "json_schema", json_schema: { strict: true, … } }`, and the planner depends on that constrained decoding. If a server reports that the context is exceeded, the run fails at once with a clear error. If a reply is cut off at `max_tokens`, the planner retries with a request for a shorter answer.
+The server should support structured outputs. Every request first sends `response_format: { type: "json_schema", json_schema: { strict: true, … } }`, and constrained decoding is what keeps most replies valid on the first try. If the server refuses `json_schema` for a request (OpenCode Go answers "response_format type is unavailable now" to about one request in six), that request is sent again at once in JSON mode (`type: "json_object"`) with the schema in the prompt; the planner checks the reply against the schema and repairs it if needed. Other transient gateway failures (network errors, HTTP 408/429/5xx, or a 400 such as "upstream request failed … try again") are retried up to twice, after 2 s and 6 s. If a server reports that the context is exceeded, the run fails at once with a clear error. If a reasoning model's thinking uses the whole reply budget before it answers, the request is retried once; if it happens again, the run fails and asks you to raise **Max reply tokens**. If a reply is cut off inside the answer, the planner retries with a request for a shorter answer.
 
 Every request also carries `User-Agent: dawnskill/<version>` and an `x-opencode-session` ID that is fixed for one plan run and new for the next. OpenCode Go needs the session header; other servers ignore it.
 
@@ -103,14 +104,15 @@ The Anthropic and OpenAI APIs have no preset. Anthropic's OpenAI-compatible endp
 
 #### OpenCode Go models
 
-Go's models reason before they answer, and those tokens count against `max_tokens`. In one of five `longcat-2.0` test runs, a request passed the 120 s default timeout. If runs time out or are cut off, set `DAWNSKILL_LLM_TIMEOUT_MS=300000` and `DAWNSKILL_LLM_MAX_TOKENS=8192`.
+Go's models reason before they answer, and those tokens count against `max_tokens`. In one of five `longcat-2.0` test runs, a request passed the 120 s default timeout. The OpenCode Go preset therefore fills **Max reply tokens** 32768 and **Timeout** 300 s; raise them in **Settings → Model** if runs still time out or are cut off while the model is thinking. One ~7.5k-character page chunk took `deepseek-v4.1-flash` 5,711 completion tokens, 5,026 of them reasoning.
 
 Results from 16 October 2026, using one planner run per model at `DAWNSKILL_LLM_MAX_TOKENS=8192`:
 
 - Planned without a repair: `longcat-2.0`, `kimi-k3`, `mimo-v2.6-pro`, `step-5-preview`, `glm-5.3-flash`.
 - `glm-5.2` needed one repair.
+- `deepseek-v4.1-flash` refused `json_schema` in about 40% of sessions in that test; with the `json_object` fallback it has since planned a whole three-page curriculum end to end (Max reply tokens 32768, Timeout 300 s: 337 tasks, 293 new skills, 90 requests in 97 minutes).
 - Failed:
-  - `deepseek-v4-pro` rejects `json_schema`. `deepseek-v4.1-flash` rejects it in about 40% of sessions.
+  - `deepseek-v4-pro` rejects `json_schema` (tested before the `json_object` fallback).
   - `kimi-k2.7-code` accepts only `temperature: 1`.
   - `space-bunny` rejects the request.
   - `hy4-preview` runs out of tokens.
@@ -139,7 +141,7 @@ Every constant is specified, with its sources and limits, in [docs/learning-mode
 - **Tasks**: filterable list and task pages with the priority breakdown, why the task is blocked, dependencies, learning-step details, completion history, and the start, pause, complete, cancel and reopen actions.
 - **Skills**: the skill constellation, a star chart of the prerequisite graph (prerequisites to the left, brighter stars for higher levels, color for state; click a star for its level, need, prerequisites and the skills it leads to), and skill pages with levels, assessment history, self-rating, level proposals, retrieval prompts and resources.
 - **Learning**: due reviews (recalled or forgot), level confirmations, the review schedule, skill progress and a journal of everything learned, assessed, reviewed and completed.
-- **Settings**: model connection (base URL, model, API key), ranking of the priority criteria and the resulting weights, estimate statistics per category, and data export.
+- **Settings**: model connection (base URL, model, API key, max reply tokens, timeout), ranking of the priority criteria and the resulting weights, estimate statistics per category, and data export.
 
 ## Data and privacy
 
@@ -147,7 +149,7 @@ Every constant is specified, with its sources and limits, in [docs/learning-mode
 - The append-only `kernel_events` table is the source of truth. The other tables are a projection of it. On every start the app replays the log and checks the result against the stored state hash, and it refuses to start if they differ.
 - `GET /api/export` (Settings → Export everything) downloads every event as JSON: the complete, replayable history. Model settings and the API key are not events, so exports never contain them.
 - Anyone who can reach the port can change the model settings, though not read the saved key: another reason to keep the port bound to localhost.
-- The server makes outbound requests only to the configured model endpoint. Those requests contain your goal and context, the names of your existing task categories and the planned task titles. When deduplicating skills, they also contain the key, name, description and concepts of existing skills.
+- The server makes outbound requests only to the configured model endpoint and to the source pages you link in a plan request. Model requests contain your goal and context, the text of those pages, the names of your existing task categories and the planned task titles. When deduplicating skills, they also contain the key, name, description and concepts of existing skills.
 
 ## Development
 
