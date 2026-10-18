@@ -4,7 +4,7 @@
  * so every field is checked at runtime whatever its static type says.
  */
 import type { NewSkill, NewTask, TaskPatch } from "./events.ts";
-import type { DraftSkill, KernelState, PlanDraft, SkillKey } from "./types.ts";
+import type { DraftSkill, KernelState, PlanDraft, SkillKey, Task } from "./types.ts";
 
 /** Lowercase kebab-case skill key (docs/learning-model.md §2). */
 export const SKILL_KEY_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -14,16 +14,23 @@ declare const URL: { canParse(input: string): boolean };
 
 const MAX_SKILL_KEY = 64;
 const MAX_KNOWN_SHOWN = 20;
+/** Upper bounds that only stop runaway input: an uncapped plan may carry a whole curriculum. */
+const MAX_DRAFT_SKILLS = 1000;
+const MAX_DRAFT_TASKS = 1000;
 
 export function validateDraft(state: KernelState, draft: PlanDraft): readonly string[] {
 	const errors: string[] = [];
 	text(errors, "goal", draft.goal, true, 200);
 	text(errors, "summary", draft.summary, false, 2000);
-	if (!Array.isArray(draft.skills)) errors.push(`skills = ${show(draft.skills)}; legal: array of 0..30 skills`);
-	if (!Array.isArray(draft.tasks)) errors.push(`tasks = ${show(draft.tasks)}; legal: array of 1..40 tasks`);
+	if (!Array.isArray(draft.skills)) {
+		errors.push(`skills = ${show(draft.skills)}; legal: array of 0..${MAX_DRAFT_SKILLS} skills`);
+	}
+	if (!Array.isArray(draft.tasks)) {
+		errors.push(`tasks = ${show(draft.tasks)}; legal: array of 1..${MAX_DRAFT_TASKS} tasks`);
+	}
 	if (!Array.isArray(draft.skills) || !Array.isArray(draft.tasks)) return errors;
-	count(errors, "skills", draft.skills, 0, 30);
-	count(errors, "tasks", draft.tasks, 1, 40);
+	count(errors, "skills", draft.skills, 0, MAX_DRAFT_SKILLS);
+	count(errors, "tasks", draft.tasks, 1, MAX_DRAFT_TASKS);
 	const skills = objects(errors, "skills", draft.skills);
 	const tasks = objects(errors, "tasks", draft.tasks);
 
@@ -67,6 +74,14 @@ export function validateDraft(state: KernelState, draft: PlanDraft): readonly st
 		else errors.push(`${path}.ref = ${show(task.ref)} duplicates tasks[${first}]; legal: unique refs`);
 		taskFields(errors, `${path}.`, task, false);
 		requirements(errors, `${path}.requires`, task.requires, known);
+		if (task.develops !== undefined) {
+			if (Array.isArray(task.develops) && task.develops.length === 0) {
+				errors.push(`${path}.develops = array(0); legal: omitted or a non-empty array of {skill, level}`);
+			} else {
+				requirements(errors, `${path}.develops`, task.develops, known, "one entry per skill");
+				aboveRequired(errors, `${path}.develops`, task.develops, `${path}.requires`, task.requires);
+			}
+		}
 	}
 	for (const [i, task] of tasks) {
 		if (!Array.isArray(task.after)) {
@@ -92,19 +107,40 @@ export function validateDraft(state: KernelState, draft: PlanDraft): readonly st
 
 export function validateNewTask(state: KernelState, task: NewTask): readonly string[] {
 	const errors: string[] = [];
+	const known = new Set(Object.keys(state.skills));
 	goal(errors, state, task.goalId);
 	taskFields(errors, "", task, false);
-	requirements(errors, "requirements", task.requirements, new Set(Object.keys(state.skills)));
+	requirements(errors, "requirements", task.requirements, known);
+	if (task.develops !== undefined) {
+		requirements(errors, "develops", task.develops, known, "one entry per skill");
+		aboveRequired(errors, "develops", task.develops, "requirements", task.requirements);
+	}
 	return errors;
 }
 
-/** Only fields present in the patch are checked. */
-export function validateTaskPatch(state: KernelState, patch: TaskPatch): readonly string[] {
+/** Only fields present in the patch are checked, against the `task` being edited. */
+export function validateTaskPatch(state: KernelState, patch: TaskPatch, task: Task): readonly string[] {
 	const errors: string[] = [];
+	const known = new Set(Object.keys(state.skills));
 	if (patch.goalId !== undefined) goal(errors, state, patch.goalId);
 	taskFields(errors, "", patch, true);
-	if (patch.requirements !== undefined) {
-		requirements(errors, "requirements", patch.requirements, new Set(Object.keys(state.skills)));
+	if (patch.requirements !== undefined) requirements(errors, "requirements", patch.requirements, known);
+	if (patch.develops !== undefined) {
+		requirements(errors, "develops", patch.develops, known, "one entry per skill");
+		if (task.learning !== null && Array.isArray(patch.develops) && patch.develops.length > 0) {
+			errors.push(
+				`develops = ${show(patch.develops)}; legal: [] (task ${task.id} is a learning task for ${show(task.learning.skill)})`,
+			);
+		}
+	}
+	if (patch.develops !== undefined || patch.requirements !== undefined) {
+		aboveRequired(
+			errors,
+			"develops",
+			patch.develops ?? task.develops ?? [],
+			"requirements",
+			patch.requirements ?? task.requirements,
+		);
 	}
 	return errors;
 }
@@ -181,7 +217,13 @@ function taskFields(errors: string[], prefix: string, task: TaskFields, partial:
 	if (present(task.urgency)) integer(errors, `${prefix}urgency`, task.urgency, 1, 5);
 }
 
-function requirements(errors: string[], path: string, value: unknown, known: ReadonlySet<SkillKey>): void {
+function requirements(
+	errors: string[],
+	path: string,
+	value: unknown,
+	known: ReadonlySet<SkillKey>,
+	unique = "one requirement per skill",
+): void {
 	if (!Array.isArray(value)) {
 		errors.push(`${path} = ${show(value)}; legal: array of {skill, level}`);
 		return;
@@ -190,9 +232,7 @@ function requirements(errors: string[], path: string, value: unknown, known: Rea
 	for (const [i, { skill, level }] of objects<{ skill?: unknown; level?: unknown }>(errors, path, value)) {
 		const first = seen.get(skill);
 		if (first !== undefined) {
-			errors.push(
-				`${path}[${i}].skill = ${show(skill)} duplicates ${path}[${first}]; legal: one requirement per skill`,
-			);
+			errors.push(`${path}[${i}].skill = ${show(skill)} duplicates ${path}[${first}]; legal: ${unique}`);
 		} else {
 			seen.set(skill, i);
 			if (typeof skill !== "string" || !known.has(skill)) {
@@ -201,6 +241,29 @@ function requirements(errors: string[], path: string, value: unknown, known: Rea
 		}
 		integer(errors, `${path}[${i}].level`, level, 1, 5);
 	}
+}
+
+/** A task that requires a skill can only develop it beyond the required level. */
+function aboveRequired(errors: string[], path: string, value: unknown, requiresPath: string, requires: unknown): void {
+	if (!Array.isArray(value) || !Array.isArray(requires)) return;
+	value.forEach((entry: unknown, i) => {
+		if (!isObject(entry) || !Number.isInteger(entry.level)) return;
+		const j = requires.findIndex((r: unknown) => isObject(r) && r.skill === entry.skill);
+		const required = requires[j] as { readonly level?: unknown } | undefined;
+		if (required === undefined || typeof required.level !== "number" || !Number.isInteger(required.level)) return;
+		if ((entry.level as number) > required.level) return;
+		const legal =
+			required.level >= 5
+				? `remove the entry (${requiresPath}[${j}] already requires level 5)`
+				: `integer ${required.level + 1}..5`;
+		errors.push(
+			`${path}[${i}].level = ${show(entry.level)} does not exceed ${requiresPath}[${j}].level = ${required.level} for ${show(entry.skill)}; legal: ${legal}`,
+		);
+	});
+}
+
+function isObject(value: unknown): value is { readonly skill?: unknown; readonly level?: unknown } {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function goal(errors: string[], state: KernelState, goalId: unknown): void {

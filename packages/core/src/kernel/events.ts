@@ -26,9 +26,11 @@ export interface NewTask {
 	readonly importance: Likert;
 	readonly urgency: Likert;
 	readonly requirements: readonly Requirement[];
+	/** Skills the task builds; omit or leave empty for none. */
+	readonly develops?: readonly Requirement[];
 }
 
-/** Plain metadata edits; `status` and learning links are deliberately absent. */
+/** Plain metadata edits; `status` and learning links are deliberately absent. `develops: []` removes the link. */
 export interface TaskPatch {
 	readonly goalId?: GoalId | null;
 	readonly title?: string;
@@ -39,6 +41,7 @@ export interface TaskPatch {
 	readonly importance?: Likert;
 	readonly urgency?: Likert;
 	readonly requirements?: readonly Requirement[];
+	readonly develops?: readonly Requirement[];
 }
 
 export interface NewSkill {

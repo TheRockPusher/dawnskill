@@ -31,6 +31,7 @@ function at(step: number): Iso {
 const TS = "typescript-generics";
 const SQL = "sql-joins";
 const RUST = "rust-traits";
+const PROOFS = "proof-writing";
 const UNKNOWN_SKILL = "cobol-decks";
 
 const AGENT_TYPES: readonly EventType[] = AGENT_EVENTS;
@@ -127,7 +128,31 @@ const BAD_DRAFT: PlanDraft = {
 	tasks: [draftTask("deck", [{ skill: UNKNOWN_SKILL, level: 2 }], ["missing"])],
 };
 
-const DRAFTS: readonly PlanDraft[] = [SEED_DRAFT, NEXT_DRAFT, BAD_DRAFT];
+/** Study work: tasks develop skills (one also requires SQL below the level it develops). */
+const STUDY_DRAFT: PlanDraft = {
+	goal: "Learn proof-based mathematics",
+	summary: "",
+	skills: [skillDraft(PROOFS, "Proof writing"), skillDraft(SQL, "SQL: joins")],
+	tasks: [
+		{
+			...draftTask("book", [], []),
+			title: "Read How to Prove It by Velleman and solve its exercises",
+			category: "reading",
+			develops: [{ skill: PROOFS, level: 2 }],
+		},
+		{
+			...draftTask("essay", [{ skill: SQL, level: 1 }], ["book"]),
+			title: "Write an essay on relational algebra as logic",
+			category: "writing",
+			develops: [
+				{ skill: PROOFS, level: 3 },
+				{ skill: SQL, level: 2 },
+			],
+		},
+	],
+};
+
+const DRAFTS: readonly PlanDraft[] = [SEED_DRAFT, NEXT_DRAFT, BAD_DRAFT, STUDY_DRAFT];
 
 /** Forges non-user envelopes: only `userEvent` brands, so `apply` must still check the actor at runtime (K6). */
 function envelope(body: EventBody, actor: Actor, when: Iso): KernelEvent {
@@ -230,6 +255,38 @@ function isActive(task: Task): boolean {
 	return task.status === "open" || task.status === "doing";
 }
 
+/**
+ * Optional `develops` for new tasks and patches: absent, empty, or entries that may be legal or break
+ * one rule (unknown skill, duplicate skill, level 0, not above a requirement of the same skill).
+ */
+function developsVariant(s: KernelState, a: number, b: number): Pick<NewTask, "develops"> {
+	const skill = pick(Object.keys(s.skills), a, UNKNOWN_SKILL);
+	switch (Math.floor(a / 7) % 6) {
+		case 0:
+			return {};
+		case 1:
+			return { develops: [] };
+		case 2:
+			return { develops: [{ skill, level: oneToFive(b) }] };
+		case 3:
+			return {
+				develops: [
+					{ skill, level: oneToFive(b) },
+					{ skill: pick(Object.keys(s.skills), a + 1, UNKNOWN_SKILL), level: oneToFive(b + 2) },
+				],
+			};
+		case 4:
+			return { develops: [{ skill, level: 0 as TargetLevel }] };
+		default:
+			return {
+				develops: [
+					{ skill, level: oneToFive(b) },
+					{ skill, level: oneToFive(b + 1) },
+				],
+			};
+	}
+}
+
 type Builders = {
 	readonly [K in EventType]: (state: KernelState, intent: Intent) => Extract<EventBody, { readonly type: K }>;
 };
@@ -248,6 +305,7 @@ const BUILDERS: Builders = {
 			importance: oneToFive(a),
 			urgency: oneToFive(b),
 			requirements: c % 2 === 0 ? [] : [{ skill: pick(Object.keys(s.skills), a, UNKNOWN_SKILL), level: oneToFive(b) }],
+			...developsVariant(s, a, b),
 		},
 	}),
 	TaskEdited: (s, { a, b, c }) => {
@@ -256,6 +314,8 @@ const BUILDERS: Builders = {
 			{ importance: oneToFive(b), urgency: oneToFive(c) },
 			{ requirements: [{ skill: pick(Object.keys(s.skills), b, UNKNOWN_SKILL), level: oneToFive(c) }] },
 			{ requirements: [] },
+			developsVariant(s, b, c),
+			{ develops: [] },
 			{ estimateMinutes: -5 },
 			{ goalId: pick(Object.keys(s.goals), b, "G999") },
 		];
@@ -485,6 +545,60 @@ function checkProposals(prev: KernelState, next: KernelState, event: KernelEvent
 	}
 }
 
+/**
+ * `develops` is stored only non-empty (old logs replay to the same canonical JSON), names existing
+ * skills once at 1..5 above any level the task requires for them, and never sits on a learning task.
+ * Closing a learning or developing task proposes exactly its targets the skill has not reached yet.
+ */
+function checkDevelops(prev: KernelState, next: KernelState, event: KernelEvent): void {
+	const malformed = Object.values(next.tasks)
+		.filter((task) => {
+			if (!Object.hasOwn(task, "develops")) return false;
+			const develops = task.develops ?? [];
+			const skills = develops.map((d) => d.skill);
+			return (
+				develops.length === 0 ||
+				task.learning !== null ||
+				new Set(skills).size !== skills.length ||
+				develops.some(
+					(d) =>
+						next.skills[d.skill] === undefined ||
+						!Number.isInteger(d.level) ||
+						d.level < 1 ||
+						d.level > 5 ||
+						task.requirements.some((r) => r.skill === d.skill && r.level >= d.level),
+				)
+			);
+		})
+		.map((task) => task.id);
+	expect(malformed).toEqual([]);
+	if (event.type !== "TaskCompleted") return;
+	const task = defined(prev.tasks[event.taskId], "completed task");
+	const targets =
+		task.learning === null ? (task.develops ?? []) : [{ skill: task.learning.skill, level: task.learning.targetLevel }];
+	const expected = targets
+		.filter((t) => {
+			const level = prev.skills[t.skill]?.level ?? null;
+			return level === null || level < t.level;
+		})
+		.map((t) => ({ skill: t.skill, level: t.level, fromTaskId: task.id, actor: "system", status: "pending" }));
+	const created = Object.values(next.proposals)
+		.filter((p) => prev.proposals[p.id] === undefined)
+		.map((p) =>
+			p.payload.kind === "level"
+				? {
+						skill: p.payload.skill,
+						level: p.payload.level,
+						fromTaskId: p.payload.fromTaskId,
+						actor: p.actor,
+						status: p.status,
+					}
+				: p.payload.kind,
+		);
+	expect(created).toEqual(expected);
+	if (targets.length > 0) expect(event.outcome.trim()).not.toBe("");
+}
+
 /** Checks one step and returns the state the caller keeps. */
 function checkStep(prev: KernelState, event: KernelEvent, result: ApplyResult): KernelState {
 	if (event.actor === "system" || (event.actor === "agent" && !AGENT_TYPES.includes(event.type))) {
@@ -498,6 +612,16 @@ function checkStep(prev: KernelState, event: KernelEvent, result: ApplyResult): 
 	if (event.type === "TaskStarted" && event.actor === "user") {
 		const task = prev.tasks[event.taskId];
 		if (task?.status === "open" && isBlocked(prev, task)) expect(result).toMatchObject({ ok: false, code: "blocked" });
+		// Independent of readiness.ts: closed blockers and met requirements always start, whatever the task develops.
+		const free =
+			task?.status === "open" &&
+			(prev.blockers[task.id] ?? []).every((id) => !isActive(defined(prev.tasks[id], id))) &&
+			task.requirements.every((r) => (prev.skills[r.skill]?.level ?? -1) >= r.level);
+		if (free) expect(result.ok).toBe(true);
+	}
+	if (event.type === "TaskCompleted" && event.actor === "user" && event.outcome.trim() === "") {
+		const task = prev.tasks[event.taskId];
+		if (task?.develops !== undefined) expect(result).toMatchObject({ ok: false, code: "invalid" });
 	}
 	if (!result.ok) {
 		expect(result.message).not.toBe("");
@@ -510,6 +634,7 @@ function checkStep(prev: KernelState, event: KernelEvent, result: ApplyResult): 
 	checkCompletions(prev, next, event);
 	checkGraph(prev, next, event);
 	checkProposals(prev, next, event);
+	checkDevelops(prev, next, event);
 	return next;
 }
 
@@ -732,5 +857,154 @@ describe("apply: examples", () => {
 		expect(rated.skills[TS]).toBe(edited.skills[TS]);
 		expect(rated.skills[SQL]).toEqual({ ...edited.skills[SQL], level: 2 });
 		expect(rated.tasks).toBe(edited.tasks);
+	});
+});
+
+describe("apply: develops", () => {
+	function studyTask(title: string, develops: readonly Requirement[]): NewTask {
+		return { ...newTask(title), category: "reading", develops };
+	}
+
+	function created(s: KernelState, task: NewTask, step: number): [KernelState, Task] {
+		const next = accepted(apply(s, userEvent({ type: "TaskCreated", task }, at(step))));
+		return [next, taskTitled(next, task.title)];
+	}
+
+	function edit(taskId: string, patch: TaskPatch, step: number): KernelEvent {
+		return userEvent({ type: "TaskEdited", taskId, patch }, at(step));
+	}
+
+	it("develops never blocks: a task developing unreached levels starts and plans no learning steps", () => {
+		// SQL is rated 0 at seeding, far below the developed level 4.
+		const study = studyTask("Read SQL Antipatterns and solve its exercises", [{ skill: SQL, level: 4 }]);
+		const [s, task] = created(seeded(), study, 2);
+		expect(rejected(apply(s, userEvent({ type: "LearningStepsAdded", taskId: task.id }, at(3))))).toMatchObject({
+			code: "invalid",
+		});
+		const started = accepted(apply(s, userEvent({ type: "TaskStarted", taskId: task.id }, at(3))));
+		expect(started.tasks[task.id]?.status).toBe("doing");
+	});
+
+	it("completion needs an outcome and proposes exactly the developed skills below their target", () => {
+		// Seeded levels: TS 1, SQL 0. TS at 1 is already reached; SQL 3 and PROOFS (unassessed) are not.
+		let s = accepted(
+			apply(seeded(), userEvent({ type: "SkillCreated", skill: skillDraft(PROOFS, "Proof writing") }, at(2))),
+		);
+		const [withTask, task] = created(
+			s,
+			studyTask("Read Database Theory by Abiteboul and solve its exercises", [
+				{ skill: TS, level: 1 },
+				{ skill: SQL, level: 3 },
+				{ skill: PROOFS, level: 2 },
+			]),
+			3,
+		);
+		s = withTask;
+		expect(rejected(apply(s, userEvent(done(task.id, "  "), at(4))))).toMatchObject({
+			code: "invalid",
+			message: expect.stringContaining('outcome = ""'),
+		});
+		const before = s;
+		s = accepted(
+			apply(s, userEvent({ ...done(task.id, "Solved chapters 1-6"), evidenceUrl: "https://example.com/notes" }, at(4))),
+		);
+		const fresh = Object.values(s.proposals).filter((p) => before.proposals[p.id] === undefined);
+		expect(fresh).toEqual([
+			{
+				id: `P${before.nextId}`,
+				status: "pending",
+				actor: "system",
+				payload: {
+					kind: "level",
+					skill: SQL,
+					level: 3,
+					evidence: "Solved chapters 1-6 (https://example.com/notes)",
+					fromTaskId: task.id,
+				},
+				supersedes: null,
+				note: "",
+				createdAt: at(4),
+				decidedAt: null,
+			},
+			{
+				id: `P${before.nextId + 1}`,
+				status: "pending",
+				actor: "system",
+				payload: {
+					kind: "level",
+					skill: PROOFS,
+					level: 2,
+					evidence: "Solved chapters 1-6 (https://example.com/notes)",
+					fromTaskId: task.id,
+				},
+				supersedes: null,
+				note: "",
+				createdAt: at(4),
+				decidedAt: null,
+			},
+		]);
+		expect(s.nextId).toBe(before.nextId + 2);
+		// Levels move only when the user confirms after evaluating.
+		expect(s.skills[SQL]?.level).toBe(0);
+		s = accepted(apply(s, userEvent({ type: "LevelConfirmed", proposalId: `P${before.nextId}`, evidence: "" }, at(5))));
+		expect(s.skills[SQL]?.level).toBe(3);
+	});
+
+	it("completing a task whose developed levels are all reached proposes nothing", () => {
+		const [s, task] = created(seeded(), studyTask("Re-read the TypeScript handbook", [{ skill: TS, level: 1 }]), 2);
+		const closed = accepted(apply(s, userEvent(done(task.id, "skimmed"), at(3))));
+		expect(closed.proposals).toBe(s.proposals);
+		expect(closed.nextId).toBe(s.nextId);
+	});
+
+	it("a task built without develops has no develops key, so old event logs replay to the same canonical JSON", () => {
+		let s = seeded();
+		for (const task of Object.values(s.tasks)) expect(Object.hasOwn(task, "develops")).toBe(false);
+		const [, plain] = created(s, newTask("Write release notes"), 2);
+		expect(Object.hasOwn(plain, "develops")).toBe(false);
+		const [, empty] = created(s, studyTask("Read nothing", []), 2);
+		expect(Object.hasOwn(empty, "develops")).toBe(false);
+
+		let developing: Task;
+		const celko = studyTask("Read Joe Celko's SQL for Smarties", [{ skill: SQL, level: 2 }]);
+		[s, developing] = created(s, celko, 2);
+		s = accepted(apply(s, edit(developing.id, { title: "Read SQL for Smarties" }, 3)));
+		expect(s.tasks[developing.id]?.develops).toEqual([{ skill: SQL, level: 2 }]);
+		s = accepted(apply(s, edit(developing.id, { develops: [] }, 4)));
+		expect(Object.hasOwn(defined(s.tasks[developing.id], "edited task"), "develops")).toBe(false);
+	});
+
+	it("plan approval copies develops; develops-only skills get no learning steps and never block", () => {
+		let s = accepted(
+			apply(initialState(), envelope({ type: "PlanProposed", draft: STUDY_DRAFT, supersedes: null }, "agent", at(0))),
+		);
+		const ratings = { [PROOFS]: 0, [SQL]: 0 } as const;
+		s = accepted(apply(s, userEvent({ type: "PlanApproved", proposalId: "P1", ratings }, at(1))));
+		const book = taskTitled(s, "Read How to Prove It by Velleman and solve its exercises");
+		const essay = taskTitled(s, "Write an essay on relational algebra as logic");
+		expect(book.develops).toEqual([{ skill: PROOFS, level: 2 }]);
+		expect(essay.develops).toEqual([
+			{ skill: PROOFS, level: 3 },
+			{ skill: SQL, level: 2 },
+		]);
+		expect(learningSteps(s, PROOFS)).toEqual([]);
+		// SQL is required at 1 by the essay, so exactly that gap gets a step (not the developed level 2).
+		expect(learningSteps(s, SQL).map((t) => t.learning?.targetLevel)).toEqual([1]);
+		s = accepted(apply(s, userEvent({ type: "TaskStarted", taskId: book.id }, at(2))));
+		expect(s.tasks[book.id]?.status).toBe("doing");
+	});
+
+	it("rejects develops on a learning task and develops not above the required level", () => {
+		const s = seeded();
+		const step = defined(learningSteps(s, TS)[0], "TS learning step");
+		expect(rejected(apply(s, edit(step.id, { develops: [{ skill: SQL, level: 2 }] }, 2)))).toMatchObject({
+			code: "invalid",
+			message: expect.stringContaining("is a learning task"),
+		});
+		const builder = taskTitled(s, "Build builder");
+		expect(rejected(apply(s, edit(builder.id, { develops: [{ skill: TS, level: 3 }] }, 2)))).toMatchObject({
+			code: "invalid",
+			message: `develops[0].level = 3 does not exceed requirements[0].level = 3 for "${TS}"; legal: integer 4..5`,
+		});
 	});
 });

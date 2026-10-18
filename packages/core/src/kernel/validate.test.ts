@@ -1,7 +1,17 @@
 import { fc, test } from "@fast-check/vitest";
 import { describe, expect, it } from "vitest";
 import type { NewSkill, NewTask } from "./events.ts";
-import type { DraftSkill, DraftTask, KernelState, Likert, PlanDraft, Skill, TargetLevel } from "./types.ts";
+import type {
+	DraftSkill,
+	DraftTask,
+	KernelState,
+	Likert,
+	PlanDraft,
+	Requirement,
+	Skill,
+	TargetLevel,
+	Task,
+} from "./types.ts";
 import { SKILL_KEY_PATTERN, validateDraft, validateNewSkill, validateNewTask, validateTaskPatch } from "./validate.ts";
 
 const AT = "2026-10-16T09:30:00.000Z";
@@ -69,20 +79,36 @@ const skillArb = (key: string, earlier: readonly string[]): fc.Arbitrary<DraftSk
 	});
 
 const taskArb = (ref: string, earlier: readonly string[], skillKeys: readonly string[]): fc.Arbitrary<DraftTask> =>
-	fc.record({
-		ref: fc.constant(ref),
-		title: nonEmpty(200),
-		notes: text(300),
-		doneWhen: text(200),
-		category: nonEmpty(40),
-		estimateMinutes: fc.integer({ min: 1, max: 100_000 }),
-		importance: likert,
-		urgency: likert,
-		requires: fc
-			.subarray([...skillKeys], { maxLength: Math.min(4, skillKeys.length) })
-			.chain((keys) => fc.tuple(...keys.map((skill) => level.map((l) => ({ skill, level: l }))))),
-		after: fc.subarray([...earlier]),
-	});
+	fc
+		.record({
+			ref: fc.constant(ref),
+			title: nonEmpty(200),
+			notes: text(300),
+			doneWhen: text(200),
+			category: nonEmpty(40),
+			estimateMinutes: fc.integer({ min: 1, max: 100_000 }),
+			importance: likert,
+			urgency: likert,
+			requires: fc
+				.subarray([...skillKeys], { maxLength: Math.min(4, skillKeys.length) })
+				.chain((keys) => fc.tuple(...keys.map((skill) => level.map((l) => ({ skill, level: l }))))),
+			after: fc.subarray([...earlier]),
+		})
+		.chain((task) =>
+			// Any draft skill at any level, except a required one only above its required level.
+			fc
+				.subarray([...skillKeys], { maxLength: Math.min(3, skillKeys.length) })
+				.chain((keys) =>
+					fc.tuple(
+						...keys.flatMap((skill): fc.Arbitrary<Requirement>[] => {
+							const required = task.requires.find((r) => r.skill === skill)?.level ?? 0;
+							if (required === 5) return [];
+							return [fc.integer({ min: required + 1, max: 5 }).map((l) => ({ skill, level: l as TargetLevel }))];
+						}),
+					),
+				)
+				.map((develops): DraftTask => (develops.length === 0 ? task : { ...task, develops })),
+		);
 
 /** Valid drafts: prerequisites and `after` only point backwards, so both graphs are acyclic by construction. */
 const draftArb = (extraSkills: readonly string[] = []): fc.Arbitrary<PlanDraft> =>
@@ -131,22 +157,22 @@ const MUTATIONS: Readonly<Record<string, Mutation>> = {
 	"long goal": (d) => ({ draft: { ...d, goal: "g".repeat(201) }, path: "goal" }),
 	"long summary": (d) => ({ draft: { ...d, summary: "s".repeat(2001) }, path: "summary" }),
 	"no tasks": (d) => ({ draft: { ...d, tasks: [] }, path: "tasks" }),
-	"41 tasks": (d) => ({
+	"1001 tasks": (d) => ({
 		draft: {
 			...d,
-			tasks: Array.from({ length: 41 }, (_, i) => ({ ...(d.tasks[0] as DraftTask), ref: `bulk-${i}`, after: [] })),
+			tasks: Array.from({ length: 1001 }, (_, i) => ({ ...(d.tasks[0] as DraftTask), ref: `bulk-${i}`, after: [] })),
 		},
 		path: "tasks",
 	}),
-	"31 skills": (d) => ({
+	"1001 skills": (d) => ({
 		draft: {
 			...d,
-			skills: Array.from({ length: 31 }, (_, i) => ({
+			skills: Array.from({ length: 1001 }, (_, i) => ({
 				...(d.skills[0] as DraftSkill),
 				key: `bulk-${i}`,
 				prerequisites: [],
 			})),
-			tasks: d.tasks.map((t) => ({ ...t, requires: [] })),
+			tasks: d.tasks.map(({ develops: _develops, ...t }) => ({ ...t, requires: [] })),
 		},
 		path: "skills",
 	}),
@@ -231,6 +257,31 @@ const MUTATIONS: Readonly<Record<string, Mutation>> = {
 				],
 			},
 			"tasks[0].requires[1].skill",
+		),
+	"empty develops": (d) => task0(d, { develops: [] }),
+	"unknown developed skill": (d) =>
+		task0(d, { develops: [{ skill: ABSENT_KEY, level: 1 }] }, "tasks[0].develops[0].skill"),
+	"developed level 0": (d) =>
+		task0(d, { requires: [], develops: [{ skill: firstKey(d), level: 0 }] }, "tasks[0].develops[0].level"),
+	"developed level 6": (d) =>
+		task0(d, { requires: [], develops: [{ skill: firstKey(d), level: 6 }] }, "tasks[0].develops[0].level"),
+	"duplicate developed skill": (d) =>
+		task0(
+			d,
+			{
+				requires: [],
+				develops: [
+					{ skill: firstKey(d), level: 1 },
+					{ skill: firstKey(d), level: 2 },
+				],
+			},
+			"tasks[0].develops[1].skill",
+		),
+	"develops a required skill at the required level": (d) =>
+		task0(
+			d,
+			{ requires: [{ skill: firstKey(d), level: 3 }], develops: [{ skill: firstKey(d), level: 3 }] },
+			"tasks[0].develops[0].level",
 		),
 	"unknown after": (d) => task0(d, { after: [ABSENT_REF] }, "tasks[0].after[0]"),
 	"self after": (d) => task0(d, { after: [(d.tasks[0] as DraftTask).ref] }, "tasks[0].after[0]"),
@@ -318,7 +369,7 @@ describe("validateDraft", () => {
 
 	it("non-array collections and non-object entries are reported instead of throwing", () => {
 		expect(validateDraft(state(), bad<PlanDraft>({ goal: "g", summary: "", skills: null, tasks: [] }))).toEqual([
-			"skills = null; legal: array of 0..30 skills",
+			"skills = null; legal: array of 0..1000 skills",
 		]);
 		const errors = validateDraft(state(), bad<PlanDraft>({ goal: "g", summary: "", skills: [7], tasks: [null] }));
 		expect(errors).toContain("skills[0] = 7; legal: object");
@@ -346,6 +397,14 @@ const newTask: NewTask = {
 
 describe("validateNewTask / validateTaskPatch", () => {
 	const base = state([stateSkill("rust")], ["G1"]);
+	const stored: Task = {
+		...newTask,
+		id: "T1",
+		status: "open",
+		learning: null,
+		createdAt: AT,
+		updatedAt: AT,
+	};
 
 	it("accepts a well-formed task", () => {
 		expect(validateNewTask(base, newTask)).toEqual([]);
@@ -377,15 +436,83 @@ describe("validateNewTask / validateTaskPatch", () => {
 	});
 
 	it("a patch checks only the fields it carries", () => {
-		expect(validateTaskPatch(base, {})).toEqual([]);
-		expect(validateTaskPatch(base, { notes: "fine" })).toEqual([]);
-		expect(validateTaskPatch(base, { estimateMinutes: 0, category: "" })).toEqual([
+		expect(validateTaskPatch(base, {}, stored)).toEqual([]);
+		expect(validateTaskPatch(base, { notes: "fine" }, stored)).toEqual([]);
+		expect(validateTaskPatch(base, { estimateMinutes: 0, category: "" }, stored)).toEqual([
 			'category = ""; legal: non-empty string of at most 40 chars',
 			"estimateMinutes = 0; legal: integer 1..100000",
 		]);
-		expect(validateTaskPatch(base, { requirements: [{ skill: "rust", level: bad<TargetLevel>(9) }] })).toEqual([
+		expect(validateTaskPatch(base, { requirements: [{ skill: "rust", level: bad<TargetLevel>(9) }] }, stored)).toEqual([
 			"requirements[0].level = 9; legal: integer 1..5",
 		]);
+	});
+
+	it("develops entries must name existing skills once, at levels 1..5", () => {
+		const twoSkills = state([stateSkill("rust"), stateSkill("proofs")], ["G1"]);
+		expect(validateNewTask(twoSkills, { ...newTask, develops: [{ skill: "proofs", level: 2 }] })).toEqual([]);
+		expect(validateNewTask(twoSkills, { ...newTask, develops: [] })).toEqual([]);
+		expect(validateNewTask(twoSkills, { ...newTask, develops: [{ skill: "topology", level: 2 }] })).toEqual([
+			'develops[0].skill = "topology" not found; known: proofs, rust',
+		]);
+		expect(
+			validateNewTask(twoSkills, {
+				...newTask,
+				develops: [
+					{ skill: "proofs", level: 2 },
+					{ skill: "proofs", level: bad<TargetLevel>(0) },
+				],
+			}),
+		).toEqual([
+			'develops[1].skill = "proofs" duplicates develops[0]; legal: one entry per skill',
+			"develops[1].level = 0; legal: integer 1..5",
+		]);
+		expect(validateTaskPatch(twoSkills, { develops: bad<Requirement[]>("proofs") }, stored)).toEqual([
+			'develops = "proofs"; legal: array of {skill, level}',
+		]);
+	});
+
+	it("a task can only develop a skill it requires beyond the required level", () => {
+		expect(validateNewTask(base, { ...newTask, develops: [{ skill: "rust", level: 3 }] })).toEqual([]);
+		expect(validateNewTask(base, { ...newTask, develops: [{ skill: "rust", level: 2 }] })).toEqual([
+			'develops[0].level = 2 does not exceed requirements[0].level = 2 for "rust"; legal: integer 3..5',
+		]);
+		expect(
+			validateNewTask(base, {
+				...newTask,
+				requirements: [{ skill: "rust", level: 5 }],
+				develops: [{ skill: "rust", level: 5 }],
+			}),
+		).toEqual([
+			'develops[0].level = 5 does not exceed requirements[0].level = 5 for "rust"; legal: remove the entry (requirements[0] already requires level 5)',
+		]);
+		// Either side of the pair may be the patched one; the other comes from the stored task.
+		const developing: Task = { ...stored, develops: [{ skill: "rust", level: 3 }] };
+		expect(validateTaskPatch(base, { requirements: [{ skill: "rust", level: 3 }] }, developing)).toEqual([
+			'develops[0].level = 3 does not exceed requirements[0].level = 3 for "rust"; legal: integer 4..5',
+		]);
+		expect(validateTaskPatch(base, { develops: [{ skill: "rust", level: 1 }] }, stored)).toEqual([
+			'develops[0].level = 1 does not exceed requirements[0].level = 2 for "rust"; legal: integer 3..5',
+		]);
+		expect(validateTaskPatch(base, { requirements: [] }, developing)).toEqual([]);
+	});
+
+	it("a learning task cannot develop skills; removing develops is always allowed", () => {
+		const step: Task = {
+			...stored,
+			requirements: [],
+			learning: {
+				skill: "rust",
+				targetLevel: 2,
+				activity: "guided-practice",
+				deliverable: "a parser",
+				retrievalPrompts: ["p"],
+				resources: [],
+			},
+		};
+		expect(validateTaskPatch(base, { develops: [{ skill: "rust", level: 3 }] }, step)).toEqual([
+			'develops = array(1); legal: [] (task T1 is a learning task for "rust")',
+		]);
+		expect(validateTaskPatch(base, { develops: [] }, step)).toEqual([]);
 	});
 });
 

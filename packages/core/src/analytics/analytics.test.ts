@@ -322,6 +322,39 @@ describe("reviewSchedule", () => {
 		expect(item?.streak).toBe(0);
 		expect(item?.lastReviewAt).toBeNull();
 	});
+
+	it("a done task that develops skills starts their reviews; open or cancelled ones do not", () => {
+		const done = plusDays(T0, 2);
+		const reviews = reviewSchedule(
+			stateOf({
+				taskList: [
+					task("R1", {
+						status: "done",
+						category: "reading",
+						develops: [
+							{ skill: "proofs", level: 2 },
+							{ skill: "logic", level: 1 },
+						],
+					}),
+					task("R2", { status: "cancelled", develops: [{ skill: "topology", level: 1 }] }),
+					task("R3", { status: "open", develops: [{ skill: "algebra", level: 1 }] }),
+				],
+				skillList: [
+					skill("proofs", { retrievalPrompts: ["prove it"] }),
+					skill("logic"),
+					skill("topology"),
+					skill("algebra"),
+				],
+				completions: [completion("R1", { at: done }), completion("R2", { status: "cancelled", at: done })],
+			}),
+			NOW,
+		);
+		expect(reviews.map((r) => [r.skill, r.dueAt, r.streak])).toEqual([
+			["logic", plusDays(done, 1), 0],
+			["proofs", plusDays(done, 1), 0],
+		]);
+		expect(reviews[1]?.prompts).toEqual(["prove it"]);
+	});
 });
 
 describe("deriveView", () => {

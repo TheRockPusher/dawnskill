@@ -31,6 +31,7 @@ import type {
 	Level,
 	Proposal,
 	ProposalId,
+	Requirement,
 	Skill,
 	SkillKey,
 	Task,
@@ -158,6 +159,7 @@ function taskCreated(state: KernelState, event: On<"TaskCreated">): ApplyResult 
 		urgency: input.urgency,
 		status: "open",
 		requirements: input.requirements,
+		...developsField(input.develops),
 		learning: null,
 		createdAt: event.at,
 		updatedAt: event.at,
@@ -172,10 +174,11 @@ function taskEdited(state: KernelState, event: On<"TaskEdited">): ApplyResult {
 	if (patch.goalId !== undefined && patch.goalId !== null && own(state.goals, patch.goalId) === undefined) {
 		return illegal("not-found", `goalId = "${patch.goalId}" not found; legal: null or an existing goal`);
 	}
-	const errors = validateTaskPatch(state, patch);
+	const errors = validateTaskPatch(state, patch, task);
 	if (errors.length > 0) return invalid(errors);
+	const { develops, ...rest } = task;
 	const edited: Task = {
-		...task,
+		...rest,
 		goalId: patch.goalId === undefined ? task.goalId : patch.goalId,
 		title: patch.title ?? task.title,
 		notes: patch.notes ?? task.notes,
@@ -185,6 +188,7 @@ function taskEdited(state: KernelState, event: On<"TaskEdited">): ApplyResult {
 		importance: patch.importance ?? task.importance,
 		urgency: patch.urgency ?? task.urgency,
 		requirements: patch.requirements ?? task.requirements,
+		...developsField(patch.develops ?? develops),
 		updatedAt: event.at,
 	};
 	return ok(withTask(state, edited));
@@ -213,7 +217,7 @@ function statusChanged(
 	return ok(withTask(state, moved(task, transition, event.at)));
 }
 
-/** K2: the completion row (and a level proposal for a learning step) is written in this same step. */
+/** K2: the completion row (and level proposals for a learning step or developed skills) is written in this step. */
 function taskCompleted(state: KernelState, event: On<"TaskCompleted">): ApplyResult {
 	const task = own(state.tasks, event.taskId);
 	if (task === undefined) return taskNotFound(event.taskId);
@@ -226,6 +230,9 @@ function taskCompleted(state: KernelState, event: On<"TaskCompleted">): ApplyRes
 	}
 	if (task.learning !== null && outcome.trim() === "") {
 		errors.push(`outcome = ""; legal: non-empty text saying what you learned (task ${task.id} is a learning task)`);
+	} else if (task.develops !== undefined && outcome.trim() === "") {
+		const skills = task.develops.map((d) => d.skill).join(", ");
+		errors.push(`outcome = ""; legal: non-empty text saying what you learned (task ${task.id} develops ${skills})`);
 	}
 	if (evidenceUrl !== null && !HTTP_URL.test(evidenceUrl)) {
 		errors.push(`evidenceUrl = ${JSON.stringify(evidenceUrl)}; legal: null or an http(s) URL`);
@@ -246,28 +253,32 @@ function taskCompleted(state: KernelState, event: On<"TaskCompleted">): ApplyRes
 		...withTask(state, moved(task, "TaskCompleted", event.at)),
 		completions: [...state.completions, completion],
 	};
-	const step = task.learning;
-	if (step === null) return ok(closed);
-	const current = own(state.skills, step.skill)?.level ?? null;
-	if (current !== null && current >= step.targetLevel) return ok(closed);
-	const id = `P${state.nextId}`;
-	const proposal: Proposal = {
-		id,
-		status: "pending",
-		actor: "system",
-		payload: {
-			kind: "level",
-			skill: step.skill,
-			level: step.targetLevel,
-			evidence: evidenceUrl === null ? outcome : `${outcome} (${evidenceUrl})`,
-			fromTaskId: task.id,
-		},
-		supersedes: null,
-		note: "",
-		createdAt: event.at,
-		decidedAt: null,
-	};
-	return ok({ ...closed, nextId: state.nextId + 1, proposals: { ...state.proposals, [id]: proposal } });
+	const targets: readonly Requirement[] =
+		task.learning === null ? (task.develops ?? []) : [{ skill: task.learning.skill, level: task.learning.targetLevel }];
+	let n = state.nextId;
+	const proposals: Record<ProposalId, Proposal> = { ...state.proposals };
+	for (const target of targets) {
+		const current = own(state.skills, target.skill)?.level ?? null;
+		if (current !== null && current >= target.level) continue;
+		const id = `P${n++}`;
+		proposals[id] = {
+			id,
+			status: "pending",
+			actor: "system",
+			payload: {
+				kind: "level",
+				skill: target.skill,
+				level: target.level,
+				evidence: evidenceUrl === null ? outcome : `${outcome} (${evidenceUrl})`,
+				fromTaskId: task.id,
+			},
+			supersedes: null,
+			note: "",
+			createdAt: event.at,
+			decidedAt: null,
+		};
+	}
+	return ok(n === state.nextId ? closed : { ...closed, nextId: n, proposals });
 }
 
 function taskCancelled(state: KernelState, event: On<"TaskCancelled">): ApplyResult {
@@ -512,6 +523,7 @@ function planApproved(state: KernelState, event: On<"PlanApproved">): ApplyResul
 			urgency: t.urgency,
 			status: "open",
 			requirements: t.requires,
+			...developsField(t.develops),
 			learning: null,
 			createdAt: event.at,
 			updatedAt: event.at,
@@ -686,6 +698,11 @@ function blockedMessage(state: KernelState, task: Task): string {
 
 function moved(task: Task, transition: TaskTransition, at: Iso): Task {
 	return { ...task, status: TASK_TRANSITIONS[transition].to, updatedAt: at };
+}
+
+/** `develops` is stored only when non-empty, so tasks replayed from logs that predate it keep their canonical form. */
+function developsField(develops: readonly Requirement[] | undefined): Pick<Task, "develops"> {
+	return develops === undefined || develops.length === 0 ? {} : { develops };
 }
 
 function withTask(state: KernelState, task: Task): KernelState {
